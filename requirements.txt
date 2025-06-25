@@ -1,0 +1,7 @@
+# requirements.txt
+
+# This file lists the Python packages required by this project.
+# To install all dependencies, run the following command in your activated virtual environment:
+# pip install -r requirements.txt
+
+google-generativeai
