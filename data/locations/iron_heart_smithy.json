@@ -1,0 +1,14 @@
+{
+    "id": "iron_heart_smithy",
+    "name": "The Iron Heart Smithy",
+    "description": "The roar of the forge and the rhythmic ringing of a hammer on anvil fill this soot-stained workshop. Racks of swords, axes, and armor line the walls.",
+    "characters": [
+        { "name": "Borgath", "description": "A mountain of a man with arms like tree trunks and a surprisingly gentle face. He's currently hammering a glowing piece of metal.", "stats": { "strength": 18, "dexterity": 8, "intelligence": 11 } }
+    ],
+    "items": [
+        { "name": "a discarded bent sword", "description": "A shortsword that looks like it lost a fight with something very, very large." }
+    ],
+    "exits": {
+        "the doorway to the town square": "town_square"
+    }
+}

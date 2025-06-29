@@ -1,0 +1,15 @@
+{
+    "id": "town_square",
+    "name": "Town Square",
+    "description": "The bustling town square is filled with merchants hawking their wares and children playing near a central fountain. The Salty Siren's main entrance is to the west.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "the Salty Siren's main entrance": "salty_siren_tavern",
+        "a colorful merchant stall": "market_stall",
+        "a narrow, shadowy alleyway": "shady_alley",
+        "the path to the town gate": "town_gate",
+        "the entrance to a smithy": "iron_heart_smithy",
+        "the steps of a white marble temple": "temple_of_aurora"
+    }
+}

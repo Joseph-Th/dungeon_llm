@@ -1,0 +1,12 @@
+{
+    "id": "temple_of_aurora",
+    "name": "Temple of Aurora",
+    "description": "A tranquil sanctuary of white marble. Sunlight streams through a large stained-glass window depicting a serene goddess. The air smells of old incense and wax.",
+    "characters": [
+        { "name": "Priestess Hana", "description": "A calm, eldery woman in simple white robes. She tends to a row of prayer candles.", "stats": { "strength": 7, "dexterity": 10, "intelligence": 16 } }
+    ],
+    "items": [],
+    "exits": {
+        "the grand entrance to the town square": "town_square"
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "id": "sparkleflow_riverbank",
+    "name": "Sparkleflow Riverbank",
+    "description": "A clear, fast-flowing river glitters in the sunlight. Smooth, grey stones line the bank, and small, silvery fish dart through the shallows.",
+    "characters": [],
+    "items": [
+        { "name": "a smooth, flat stone", "description": "A perfect skipping stone." }
+    ],
+    "exits": {
+        "away from the river back to the clearing": "ancient_oak_clearing"
+    }
+}

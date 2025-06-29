@@ -1,0 +1,2580 @@
+FILE: action_processor.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class ActionProcessor:
+
+    def process_action(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        intent = intent_data.get("intent")
+        
+        if intent == "take_item":
+            return self._handle_take_item(game_state, world, intent_data)
+        elif intent == "move":
+            return self._handle_move(game_state, world, ai_manager, intent_data)
+        elif intent == "pass_time":
+            return self._handle_pass_time(game_state, world, intent_data)
+        
+        logging.warning(f"No state-changing action found for intent '{intent}'.")
+        return "Automatic Success"
+
+    def _handle_take_item(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        target_name = intent_data.get("target")
+        if not target_name:
+            logging.warning("AI intent 'take_item' was missing a 'target'.")
+            return "Failure: The AI could not determine what item you wanted to take."
+
+        item_to_take = game_state.find_item_in_location(target_name, world)
+
+        if item_to_take:
+            game_state.move_item_from_location_to_player(item_to_take, world)
+            logging.info(f"Player took '{item_to_take.name}'. State updated.")
+            return "Success"
+        else:
+            logging.info(f"Player tried to take '{target_name}', but it was not found in the location.")
+            return f"Failure: The '{target_name}' is not here."
+
+    def _handle_move(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        target_id = intent_data.get("target")
+        if not target_id:
+            logging.warning("AI intent 'move' was missing a 'target' location ID.")
+            return "Failure: The AI could not determine where you wanted to go."
+        
+        current_location = game_state.get_current_location(world)
+        if not current_location:
+            logging.error(f"Player is in a non-existent location: {game_state.current_location_id}")
+            return "Failure: You are lost in the void."
+
+        exit_description = ""
+        is_valid_exit = False
+        for desc, dest_id in current_location.exits.items():
+            if dest_id == target_id:
+                is_valid_exit = True
+                exit_description = desc
+                break
+
+        if is_valid_exit:
+            destination = world.get_location(target_id)
+            if destination:
+                game_state.current_location_id = target_id
+                logging.info(f"Player moved from '{current_location.id}' to '{target_id}'. State updated.")
+                return "Success"
+            else:
+                logging.warning(f"Exit '{exit_description}' points to a non-existent location '{target_id}'. Attempting dynamic generation.")
+                
+                location_data = ai_manager.generate_new_location(
+                    source_location=current_location,
+                    exit_description=exit_description,
+                    new_location_id=target_id
+                )
+                
+                if location_data:
+                    newly_created_location = world.create_and_add_location(location_data)
+                    if newly_created_location:
+                        game_state.current_location_id = target_id
+                        logging.info(f"Dynamically created and moved player to '{target_id}'.")
+                        return "Success"
+                    else:
+                        logging.error(f"AI generated data for '{target_id}', but it was invalid and could not be added to the world.")
+                        return "Failure: The way is blocked by a shimmer of unreality."
+                else:
+                    logging.error(f"AI failed to generate data for new location '{target_id}'.")
+                    return "Failure: The way is blocked by mysterious forces."
+        else:
+            logging.info(f"Player tried to move to invalid destination '{target_id}' from '{current_location.id}'.")
+            return "Failure: You can't seem to find a way to do that."
+    
+    def _handle_pass_time(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        duration = intent_data.get("duration")
+        if not isinstance(duration, int) or duration <= 0:
+            logging.warning(f"AI intent 'pass_time' had invalid duration: {duration}.")
+            return "Failure: The AI could not determine how long you wanted to wait."
+        
+        game_state.minutes_elapsed += duration
+        logging.info(f"Player passed time by {duration} minutes. New time: {game_state.minutes_elapsed}")
+        return "Success"
+
+FILE: ai_manager.py
+import google.generativeai as genai
+import json
+import logging
+from typing import Optional, Dict, Any
+
+from config import GEMINI_API_KEY, MODEL_NAME
+from prompts import (
+    INFERENCE_PROMPT, 
+    MECHANICS_PROMPT, 
+    NARRATION_PROMPT, 
+    LOCATION_GENERATION_PROMPT,
+    NPC_STATE_UPDATE_PROMPT,
+    WORLD_EVENT_PROMPT,
+    DIALOGUE_GENERATION_PROMPT,
+    QUEST_GENERATION_PROMPT
+)
+from game_state import GameState, GameWorld, Location, Character
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class AIManager:
+    def __init__(self):
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            self.model = genai.GenerativeModel(MODEL_NAME)
+            logging.info(f"AIManager initialized successfully with model '{MODEL_NAME}'.")
+        except Exception as e:
+            logging.critical(f"Failed to configure Gemini API. Is the API key valid? Error: {e}")
+            raise
+
+    def _execute_prompt(self, prompt: str, expect_json: bool = True) -> Optional[Dict[str, Any] | str]:
+        response = None
+        try:
+            response = self.model.generate_content(prompt)
+            raw_text = response.text.strip()
+
+            if not expect_json:
+                return raw_text
+
+            cleaned_text = raw_text.replace("```json", "").replace("```", "").strip()
+            if not cleaned_text:
+                logging.warning("Received empty response from API.")
+                return None
+            
+            return json.loads(cleaned_text)
+
+        except json.JSONDecodeError as e:
+            error_text = response.text if response else "N/A"
+            logging.error(f"Failed to decode JSON from API response. Error: {e}. Raw text was: '{error_text}'")
+            return None
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during API call: {e}")
+            return None
+
+    def get_player_intent(self, game_state: GameState, world: GameWorld, user_input: str) -> Optional[Dict[str, Any]]:
+        logging.info(f"Phase 1: Inferring intent for input: '{user_input}'")
+        context_str = game_state.get_context_string(world)
+        
+        prompt = f"""{INFERENCE_PROMPT}
+
+Here is the current game state for context:
+{context_str}
+
+Here is the player's command:
+"{user_input}"
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict):
+            return result
+        return None
+
+    def determine_skill_check_details(self, game_state: GameState, world: GameWorld, action_description: str) -> Optional[Dict[str, Any]]:
+        logging.info(f"Phase 2: Determining mechanics for action: '{action_description}'")
+        context_str = game_state.get_context_string(world)
+
+        prompt = f"""{MECHANICS_PROMPT}
+
+Here is the current game state for context:
+{context_str}
+
+Here is the player's described action:
+"{action_description}"
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict):
+            return result
+        return None
+        
+    def generate_quest_from_context(self, quest_giver: Character, offer_memory: str) -> Optional[Dict[str, Any]]:
+        logging.info(f"Generating quest from NPC '{quest_giver.name}' based on memory: '{offer_memory}'.")
+        
+        prompt = f"""{QUEST_GENERATION_PROMPT}
+
+CONTEXT:
+- Quest Giver Name: "{quest_giver.name}"
+- The quest giver's memory of the offer: "{offer_memory}"
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict):
+            logging.info(f"Successfully generated JSON data for new quest from '{quest_giver.name}'.")
+            return result
+        
+        logging.error(f"Failed to generate valid JSON for quest from '{quest_giver.name}'.")
+        return None
+
+
+    def generate_new_location(self, source_location: Location, exit_description: str, new_location_id: str) -> Optional[Dict[str, Any]]:
+        logging.info(f"Dynamically generating new location '{new_location_id}' from source '{source_location.id}'.")
+
+        prompt = f"""{LOCATION_GENERATION_PROMPT}
+
+Here is the context for the new location to generate:
+- The player is coming from a location named: "{source_location.name}" (ID: {source_location.id})
+- The exit they used was described as: "{exit_description}"
+- The required unique ID for this new location must be: "{new_location_id}"
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict):
+            logging.info(f"Successfully generated JSON data for new location '{new_location_id}'.")
+            return result
+        
+        logging.error(f"Failed to generate valid JSON for new location '{new_location_id}'.")
+        return None
+
+    def narrate_outcome(self, game_state: GameState, world: GameWorld, action_description: str, result: str) -> str:
+        logging.info(f"Phase 3: Narrating outcome for result: '{result}'")
+        context_str = game_state.get_context_string(world)
+        
+        prompt = f"""{NARRATION_PROMPT}
+
+Here is the current game state for context:
+{context_str}
+
+Here is what the player tried to do:
+"{action_description}"
+
+Here is the result of their attempt: {result}
+"""
+        narration = self._execute_prompt(prompt, expect_json=False)
+        if isinstance(narration, str) and narration:
+            return narration
+        return "The world seems to pause for a moment, unsure how to react. Perhaps try something else?"
+        
+    def generate_dialogue_response(self, game_state: GameState, world: GameWorld, npc: Character, topic: str) -> Optional[str]:
+        logging.info(f"Generating dialogue for NPC '{npc.name}' on topic: '{topic}'")
+        
+        context_str = game_state.get_context_string(world)
+
+        prompt = f"""{DIALOGUE_GENERATION_PROMPT}
+        
+CONTEXT:
+- Current Game State: {context_str}
+- NPC being spoken to: {json.dumps(npc.to_dict(), indent=2)}
+- Player's action/topic of conversation: "{topic}"
+"""
+        narration = self._execute_prompt(prompt, expect_json=False)
+        if isinstance(narration, str) and narration:
+            return narration.strip('"') 
+        return None
+
+    def update_npc_state(self, npc: Character, action_description: str, narration: str) -> Optional[Dict[str, Any]]:
+        logging.info(f"Phase 4: Updating state for NPC '{npc.name}'.")
+        
+        npc_state_json = json.dumps(npc.to_dict(), indent=2)
+
+        prompt = f"""{NPC_STATE_UPDATE_PROMPT}
+
+CONTEXT:
+- Current NPC State: {npc_state_json}
+- Player's Action: "{action_description}"
+- Interaction Outcome (Narration): "{narration}"
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict):
+            return result
+        return None
+
+    def generate_world_event(self, game_state: GameState, world: GameWorld) -> Optional[Dict[str, Any]]:
+        logging.info("Checking for a background world event...")
+        context_str = game_state.get_context_string(world)
+        
+        prompt = f"""{WORLD_EVENT_PROMPT}
+
+Here is the current game state for context:
+{context_str}
+"""
+        result = self._execute_prompt(prompt, expect_json=True)
+        if isinstance(result, dict) and result:
+            return result
+        return None
+
+FILE: config.py
+# config.py
+
+# --- Gemini API Configuration ---
+# Replace "YOUR_API_KEY_HERE" with the actual API key you generated
+# from Google AI Studio.
+#
+# IMPORTANT:
+# 1. Do not share this file or your key with anyone.
+# 2. If you use a version control system like Git, add this file's name
+#    to your .gitignore file to prevent it from ever being uploaded.
+GEMINI_API_KEY = "AIzaSyA0BM8H6zh-LSWootFH_Subnur7bPQk_cs"
+
+# --- Game Configuration ---
+# The name of the AI model to use.
+# "gemini-1.5-flash" is a fast, multimodal model suitable for a wide range of applications.
+# The "gemini-pro" model name you were using is older and has been superseded.
+MODEL_NAME = "gemini-1.5-flash"
+
+FILE: event_executor.py
+import logging
+from typing import List, Dict, Any, TYPE_CHECKING
+
+from game_state import GameState, GameWorld, Character
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+def execute_player_mutations(game_state: GameState, mutations: List[Dict[str, Any]]):
+    for mutation in mutations:
+        op = mutation.get("op")
+        logging.info(f"Executing player mutation: {op}")
+        try:
+            if op == "damage_player":
+                amount = mutation["amount"]
+                game_state.player.hp -= amount
+                logging.info(f"Player took {amount} damage. New HP: {game_state.player.hp}")
+            elif op == "add_player_status":
+                effect = mutation["effect"]
+                if effect not in game_state.player.status_effects:
+                    game_state.player.status_effects.append(effect)
+                    logging.info(f"Player gained status effect: {effect}")
+            elif op == "remove_player_status":
+                effect = mutation["effect"]
+                if effect in game_state.player.status_effects:
+                    game_state.player.status_effects.remove(effect)
+                    logging.info(f"Player lost status effect: {effect}")
+        except (KeyError, TypeError) as e:
+            logging.error(f"Invalid player mutation format for op '{op}'. Error: {e}. Mutation: {mutation}")
+
+def execute_world_mutations(game_state: GameState, world: GameWorld, mutations: List[Dict[str, Any]]):
+    for mutation in mutations:
+        op = mutation.get("op")
+        logging.info(f"Executing world event mutation: {op}")
+        try:
+            if op == "move_npc":
+                char_name = mutation["character_name"]
+                new_loc_id = mutation["new_location_id"]
+                char_data = world.find_character_anywhere(char_name)
+                new_loc = world.get_location(new_loc_id)
+                if char_data and new_loc:
+                    char, old_loc = char_data
+                    if old_loc.id != new_loc.id:
+                        old_loc.remove_character(char)
+                        new_loc.add_character(char)
+                        logging.info(f"Moved NPC '{char_name}' from '{old_loc.id}' to '{new_loc_id}'.")
+            elif op == "add_character":
+                loc_id = mutation["location_id"]
+                loc = world.get_location(loc_id)
+                if loc:
+                    char_data = mutation["character"]
+                    new_char = Character(**char_data)
+                    loc.add_character(new_char)
+            elif op == "remove_character":
+                loc_id = mutation["location_id"]
+                char_name = mutation["character_name"]
+                loc = world.get_location(loc_id)
+                if loc:
+                    char_to_remove = next((c for c in loc.characters if c.name == char_name), None)
+                    if char_to_remove:
+                        loc.remove_character(char_to_remove)
+                        logging.info(f"Removed NPC '{char_name}' from location '{loc_id}'.")
+            elif op == "update_location_description":
+                loc_id = mutation["location_id"]
+                new_desc = mutation["new_description"]
+                loc = world.get_location(loc_id)
+                if loc:
+                    loc.description = new_desc
+                    logging.info(f"Updated description for location '{loc_id}'.")
+            elif op == "add_exit":
+                loc_id = mutation["location_id"]
+                exit_desc = mutation["exit_description"]
+                dest_id = mutation["destination_id"]
+                loc = world.get_location(loc_id)
+                if loc:
+                    loc.exits[exit_desc] = dest_id
+                    logging.info(f"Added exit from '{loc_id}' to '{dest_id}'.")
+            elif op == "remove_exit":
+                loc_id = mutation["location_id"]
+                exit_desc = mutation["exit_description"]
+                loc = world.get_location(loc_id)
+                if loc and exit_desc in loc.exits:
+                    del loc.exits[exit_desc]
+                    logging.info(f"Removed exit '{exit_desc}' from location '{loc_id}'.")
+
+        except (KeyError, TypeError) as e:
+            logging.error(f"Invalid world mutation format for op '{op}'. Error: {e}. Mutation: {mutation}")
+
+def execute_npc_schedules(game_state: GameState, world: GameWorld):
+    current_hour = (game_state.minutes_elapsed // 60) % 24
+    
+    mutations_to_execute = []
+
+    for location in world.locations.values():
+        for character in location.characters:
+            if not character.schedule:
+                continue
+            
+            target_location_id = character.schedule.get(f"{current_hour:02d}:00")
+            if target_location_id and location.id != target_location_id:
+                mutation = {
+                    "op": "move_npc",
+                    "character_name": character.name,
+                    "new_location_id": target_location_id
+                }
+                mutations_to_execute.append(mutation)
+                logging.info(f"NPC '{character.name}' is scheduled to move to '{target_location_id}'.")
+
+    if mutations_to_execute:
+        execute_world_mutations(game_state, world, mutations_to_execute)
+
+def check_and_trigger_world_events(game_state: GameState, world: GameWorld, ai_manager: 'AIManager', old_minutes: int):
+    old_hour = old_minutes // 60
+    new_hour = game_state.minutes_elapsed // 60
+    
+    if new_hour > old_hour:
+        logging.info(f"Time has passed into a new hour ({old_hour} -> {new_hour}). Checking for world events.")
+        
+        execute_npc_schedules(game_state, world)
+        
+        event_data = ai_manager.generate_world_event(game_state, world)
+        if event_data:
+            summary = event_data.get("narration_summary")
+            mutations = event_data.get("mutations", [])
+            
+            if summary:
+                print(f"\n[Time Passes...] {summary}")
+            
+            if mutations:
+                execute_world_mutations(game_state, world, mutations)
+
+def handle_npc_state_update(game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict, action_desc: str, narration: str):
+    if intent_data.get("intent") != "dialogue":
+        return
+
+    target_name = intent_data.get("target")
+    if not target_name:
+        return
+
+    npc = game_state.find_character_in_location(target_name, world)
+    if not npc:
+        return
+
+    npc_update_data = ai_manager.update_npc_state(npc, action_desc, narration)
+    if npc_update_data:
+        new_mood = npc_update_data.get("new_mood")
+        new_memory = npc_update_data.get("new_memory")
+        if new_mood:
+            logging.info(f"Updating NPC '{npc.name}' mood from '{npc.mood}' to '{new_mood}'.")
+            npc.mood = new_mood
+        if new_memory:
+            logging.info(f"Adding new memory to NPC '{npc.name}': '{new_memory}'")
+            npc.memory.append(new_memory)
+
+FILE: game_mechanics.py
+import random
+import logging
+from typing import Dict
+
+from game_state import Character
+
+def calculate_stat_modifier(stat_value: int) -> int:
+    return (stat_value - 10) // 2
+
+def perform_skill_check(player: Character, skill: str, dc: int) -> bool:
+    skill = skill.lower()
+    player_stat_value = player.stats.get(skill, 10)
+    
+    if player_stat_value is None:
+        logging.warning(f"Player '{player.name}' has no stat named '{skill}'. Defaulting to 10.")
+        player_stat_value = 10
+        
+    modifier = calculate_stat_modifier(player_stat_value)
+    roll = random.randint(1, 20)
+    total = roll + modifier
+
+    logging.info(f"--- SKILL CHECK: {skill.upper()} ---")
+    logging.info(f"  - Difficulty Class (DC): {dc}")
+    logging.info(f"  - Player Stat ({skill}): {player_stat_value} (Modifier: {modifier:+.0f})")
+    logging.info(f"  - Dice Roll (d20): {roll}")
+    logging.info(f"  - Total: {total}")
+
+    if total >= dc:
+        logging.info("  - Result: SUCCESS")
+        return True
+    else:
+        logging.info("  - Result: FAILURE")
+        return False
+
+FILE: game_state.py
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Tuple
+import json
+import logging
+
+from definitions.entities import Character, Item
+from definitions.world_objects import Location, Interactable
+from definitions.quests import Quest
+
+@dataclass
+class GameWorld:
+    locations: Dict[str, Location] = field(default_factory=dict)
+
+    def get_location(self, location_id: str) -> Optional[Location]:
+        return self.locations.get(location_id)
+    
+    def find_character_anywhere(self, character_name: str) -> Optional[Tuple[Character, Location]]:
+        for loc in self.locations.values():
+            for char in loc.characters:
+                if char.name.lower() == character_name.lower():
+                    return char, loc
+        return None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return { "locations": {loc_id: loc.to_dict() for loc_id, loc in self.locations.items()} }
+
+    def create_and_add_location(self, location_data: Dict[str, Any]) -> Optional[Location]:
+        try:
+            loc_id = location_data['id']
+            
+            items = [Item(**item) for item in location_data.get('items', [])]
+            interactables = [Interactable(**i) for i in location_data.get('interactables', [])]
+            characters = []
+            for char_data in location_data.get('characters', []):
+                char_init_data = {
+                    'name': char_data['name'],
+                    'description': char_data['description'],
+                    'stats': char_data['stats'],
+                    'inventory': [],
+                    'mood': char_data.get('mood', 'neutral'),
+                    'memory': char_data.get('memory', []),
+                    'hp': char_data.get('hp', 20),
+                    'max_hp': char_data.get('max_hp', 20),
+                    'status_effects': char_data.get('status_effects', []),
+                    'level': char_data.get('level', 1),
+                    'xp': char_data.get('xp', 0),
+                    'xp_to_next_level': char_data.get('xp_to_next_level', 100),
+                    'armor_class': char_data.get('armor_class', 10),
+                    'attack_bonus': char_data.get('attack_bonus', 0),
+                    'is_hostile': char_data.get('is_hostile', False),
+                    'faction': char_data.get('faction', None),
+                    'schedule': char_data.get('schedule', None)
+                }
+                characters.append(Character(**char_init_data))
+
+            new_location = Location(
+                id=loc_id,
+                name=location_data['name'],
+                description=location_data['description'],
+                characters=characters,
+                items=items,
+                interactables=interactables,
+                exits=location_data.get('exits', {})
+            )
+            self.locations[loc_id] = new_location
+            logging.info(f"Successfully created and added new location '{loc_id}' to the world.")
+            return new_location
+        except (KeyError, TypeError) as e:
+            logging.error(f"Failed to create location from AI-generated data. Missing key or wrong type: {e}. Data: {location_data}")
+            return None
+
+
+@dataclass
+class GameState:
+    player: Character
+    current_location_id: str
+    turn_count: int = 0
+    minutes_elapsed: int = 480 
+    quest_log: Dict[str, Quest] = field(default_factory=dict)
+    combat_state: Optional[Dict[str, Any]] = None
+    reputation: Dict[str, int] = field(default_factory=dict)
+    player_knowledge: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def time_of_day(self) -> str:
+        hour = (self.minutes_elapsed // 60) % 24
+        if 5 <= hour < 12:
+            return "Morning"
+        elif 12 <= hour < 17:
+            return "Afternoon"
+        elif 17 <= hour < 21:
+            return "Evening"
+        else:
+            return "Night"
+
+    def get_current_location(self, world: GameWorld) -> Optional[Location]:
+        return world.get_location(self.current_location_id)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "player": self.player.to_dict(),
+            "current_location_id": self.current_location_id,
+            "turn_count": self.turn_count,
+            "time_of_day": self.time_of_day,
+            "minutes_elapsed": self.minutes_elapsed,
+            "quest_log": {qid: q.to_dict() for qid, q in self.quest_log.items()},
+            "combat_state": self.combat_state,
+            "reputation": self.reputation,
+            "player_knowledge": self.player_knowledge,
+        }
+
+    def get_context_string(self, world: GameWorld) -> str:
+        current_location = self.get_current_location(world)
+        if not current_location:
+            return json.dumps({"error": f"current location '{self.current_location_id}' not found in world"})
+
+        state_dict = self.to_dict()
+        state_dict["location"] = current_location.to_dict()
+        
+        # Reorder player to be last for better AI context readability
+        player_data = state_dict.pop("player")
+        state_dict["player"] = player_data
+        
+        return json.dumps(state_dict, indent=2)
+
+    def find_in_location(self, name: str, world: GameWorld) -> Optional[Tuple[Any, str]]:
+        location = self.get_current_location(world)
+        if not location: return None
+        
+        name_lower = name.lower()
+        
+        for char in location.characters:
+            if name_lower in char.name.lower():
+                return char, "character"
+        for item in location.items:
+            if name_lower in item.name.lower():
+                return item, "item"
+        for i in location.interactables:
+            if name_lower in i.name.lower():
+                return i, "interactable"
+        return None
+
+    def find_item_in_location(self, name: str, world: GameWorld) -> Optional[Item]:
+        result = self.find_in_location(name, world)
+        return result[0] if result and result[1] == "item" else None
+
+    def find_character_in_location(self, name: str, world: GameWorld) -> Optional[Character]:
+        result = self.find_in_location(name, world)
+        return result[0] if result and result[1] == "character" else None
+    
+    def move_item_from_location_to_player(self, item: Item, world: GameWorld):
+        location = self.get_current_location(world)
+        if location:
+            try:
+                location.remove_item(item)
+                self.player.add_item_to_inventory(item)
+            except ValueError:
+                logging.error(f"Attempted to move item '{item.name}' that was not in location '{location.id}'.")
+
+FILE: main.py
+import logging
+from typing import Tuple, Optional, Dict, Any
+
+from ai_manager import AIManager
+from game_state import GameState, GameWorld
+from definitions.entities import Character, Item
+from game_mechanics import perform_skill_check
+from persistence import PersistenceManager
+from action_processor import ActionProcessor
+from meta_command_handler import MetaCommandHandler
+from world_loader import WorldLoader
+from event_executor import (
+    execute_player_mutations, 
+    check_and_trigger_world_events,
+    handle_npc_state_update
+)
+from action_handlers.item_handler import ItemHandler
+from action_handlers.combat_handler import CombatHandler
+from action_handlers.interaction_handler import InteractionHandler
+from action_handlers.dialogue_handler import DialogueHandler
+from action_handlers.equipment_handler import EquipmentHandler
+from quest_manager import QuestManager
+from progression_manager import ProgressionManager
+from reputation_manager import ReputationManager
+
+def setup_new_game() -> Tuple[GameState, GameWorld]:
+    logging.info("Setting up a new game world.")
+    
+    world_loader = WorldLoader(locations_data_dir="data/locations")
+    world = world_loader.load_world()
+
+    player = Character(
+        name="Arion",
+        description="A determined adventurer with a strong arm and a quick wit.",
+        stats={"strength": 16, "dexterity": 12, "intelligence": 14},
+    )
+    
+    game_state = GameState(player=player, current_location_id="salty_siren_tavern")
+
+    return game_state, world
+
+def print_location(game_state: GameState, world: GameWorld):
+    current_location = game_state.get_current_location(world)
+    if not current_location:
+        logging.error(f"Cannot print location: Player's location ID '{game_state.current_location_id}' is invalid.")
+        print("\nYou are utterly lost in a formless void.")
+        return
+    
+    print(f"\nLocation: {current_location.name}")
+    print(current_location.description)
+    if current_location.items:
+        print("You see:", ", ".join(item.name for item in current_location.items) + ".")
+    if current_location.characters:
+        print("People here:", ", ".join(char.name for char in current_location.characters) + ".")
+    
+    if current_location.exits:
+        print("Exits:")
+        for exit_desc in current_location.exits.keys():
+            print(f" - {exit_desc.capitalize()}")
+
+def game_loop(
+    game_state: GameState, 
+    world: GameWorld, 
+    ai_manager: AIManager, 
+    meta_handler: MetaCommandHandler,
+    intent_handlers: Dict[str, Any],
+    reputation_manager: ReputationManager
+):
+    quest_manager = intent_handlers["quest_manager"]
+    progression_manager = intent_handlers["progression_manager"]
+    command_aliases = { "i": "inventory", "eq": "equipment", "l": "look" }
+
+    while True:
+        try:
+            prompt_str = "> "
+            if game_state.combat_state:
+                # Check if it's the player's turn before changing prompt
+                if len(game_state.combat_state["participants"]) > game_state.combat_state["turn_index"]:
+                    active_char_name = game_state.combat_state["participants"][game_state.combat_state["turn_index"]]
+                    if active_char_name == game_state.player.name:
+                        prompt_str = "[COMBAT] > "
+
+            full_input = input(f"\n{prompt_str}")
+            if not full_input:
+                continue
+            
+            # --- ALIAS LOGIC FIX ---
+            # Check if the entire stripped input is an alias, not just the first word.
+            processed_input = full_input.lower().strip()
+            if processed_input in command_aliases:
+                full_input = command_aliases[processed_input]
+            
+            command_was_handled, new_state, new_world = meta_handler.handle_command(full_input, game_state, world)
+            
+            if command_was_handled:
+                if new_state is None: # Quit command was issued
+                    break
+                assert new_world is not None
+                game_state = new_state
+                world = new_world
+                continue
+
+            old_minutes_elapsed = game_state.minutes_elapsed
+            game_state.turn_count += 1
+            original_location_id = game_state.current_location_id
+            
+            intent_data = ai_manager.get_player_intent(game_state, world, full_input)
+            if not intent_data or not isinstance(intent_data, dict):
+                print("\nThe DM seems to have misunderstood you. Please try rephrasing your action.")
+                continue
+
+            intent = intent_data.get("intent")
+            if not isinstance(intent, str):
+                print("\nThe DM's intentions are unclear. Please try rephrasing your action.")
+                continue
+
+            action_desc = intent_data.get("action_description", f"The player attempts: {full_input}")
+            result_string = f"Failure: The intent '{intent}' is not recognized by the game."
+
+            handler = intent_handlers.get(intent)
+            if handler:
+                result_string = handler(game_state, world, ai_manager, intent_data)
+            elif intent == "skill_check":
+                mechanics_data = ai_manager.determine_skill_check_details(game_state, world, action_desc)
+                if not mechanics_data or not mechanics_data.get("is_possible", False) or "skill" not in mechanics_data or "dc" not in mechanics_data:
+                    result_string = "Failure: The DM seems confused about the rules for that."
+                else:
+                    success = perform_skill_check(game_state.player, mechanics_data["skill"], mechanics_data["dc"])
+                    result_string = "Success" if success else "Failure"
+                    mutations_to_apply = mechanics_data.get("on_success" if success else "on_failure", [])
+                    execute_player_mutations(game_state, mutations_to_apply)
+
+            if "Failure" not in result_string and "Impossible" not in result_string and not game_state.combat_state:
+                 if intent != "pass_time":
+                    game_state.minutes_elapsed += 5
+
+            narration = ai_manager.narrate_outcome(game_state, world, action_desc, result_string)
+            print(f"\n{narration}")
+            
+            handle_npc_state_update(game_state, world, ai_manager, intent_data, action_desc, narration)
+
+            if intent == "give_item" or intent == "attack":
+                target_name = intent_data.get("target")
+                target_char = game_state.find_character_in_location(target_name, world) if target_name else None
+                reputation_manager.process_event(game_state, intent, target_char)
+
+            if intent == "move" and "Success" in result_string and game_state.current_location_id != original_location_id:
+                print_location(game_state, world)
+            
+            if intent == "look" and intent_data.get("target") is None:
+                print_location(game_state, world)
+
+            quest_manager.check_for_updates(game_state, intent, result_string, intent_data)
+            progression_manager.check_for_levelup(game_state)
+            check_and_trigger_world_events(game_state, world, ai_manager, old_minutes_elapsed)
+
+        except KeyboardInterrupt:
+            print("\nExiting game. Goodbye!")
+            break
+        except Exception as e:
+            logging.error(f"An unexpected error occurred in the main loop: {e}", exc_info=True)
+            print("\nA critical error occurred. The game must end. Please check the logs.")
+            break
+
+def main():
+    logging.info("--- Gemini Dungeon Master Initializing ---")
+    
+    persistence_manager = PersistenceManager()
+    action_processor = ActionProcessor()
+    meta_handler = MetaCommandHandler(persistence_manager)
+    item_handler = ItemHandler()
+    combat_handler = CombatHandler()
+    interaction_handler = InteractionHandler()
+    dialogue_handler = DialogueHandler()
+    equipment_handler = EquipmentHandler()
+    quest_manager = QuestManager()
+    progression_manager = ProgressionManager()
+    reputation_manager = ReputationManager()
+
+    intent_handlers: Dict[str, Any] = {
+        "move": action_processor.process_action,
+        "take_item": action_processor.process_action,
+        "pass_time": action_processor.process_action,
+        "use_item": item_handler.process_item_intent,
+        "drop_item": item_handler.process_item_intent,
+        "give_item": item_handler.process_item_intent,
+        "attack": combat_handler.process_combat_intent,
+        "interact": interaction_handler.process_interaction_intent,
+        "look": interaction_handler.process_interaction_intent,
+        "dialogue": dialogue_handler.process_dialogue_intent,
+        "equip": equipment_handler.process_equipment_intent,
+        "unequip": equipment_handler.process_equipment_intent,
+        "quest_manager": quest_manager,
+        "progression_manager": progression_manager
+    }
+
+    print("\n--- Welcome to Gemini Dungeon Master ---")
+    
+    game_state: Optional[GameState] = None
+    world: Optional[GameWorld] = None
+    
+    existing_saves = persistence_manager.list_save_games()
+    if existing_saves:
+        print("Found existing save games:", ", ".join(existing_saves))
+        choice = input("Type a save name to load, or type 'new' to start a new game: ").lower()
+        if choice != 'new':
+            loaded_data = persistence_manager.load_game(choice)
+            if loaded_data:
+                game_state, world = loaded_data
+
+    if not game_state or not world:
+        try:
+            game_state, world = setup_new_game()
+            print("\n--- Your Adventure Begins ---")
+        except Exception as e:
+            logging.critical(f"Failed to setup new game from world data. Error: {e}")
+            print("\nFATAL ERROR: Could not load the game world. Please check game data files.")
+            return
+    else:
+        print("\n--- Resuming Your Adventure ---")
+
+    if not game_state or not world:
+        logging.critical("FATAL: Game state or world could not be initialized.")
+        print("\nA critical error prevented the game from starting. Please check logs.")
+        return
+
+    try:
+        ai_manager = AIManager()
+    except Exception as e:
+        logging.critical(f"Failed to initialize the AI Manager. Exiting. Error: {e}")
+        return
+
+    print(f"You are {game_state.player.name}, {game_state.player.description}")
+    print_location(game_state, world)
+
+    game_loop(game_state, world, ai_manager, meta_handler, intent_handlers, reputation_manager)
+
+if __name__ == "__main__":
+    main()
+
+FILE: meta_command_handler.py
+import logging
+from typing import List, Optional, Tuple
+
+from game_state import GameState, GameWorld, Character, Item
+from persistence import PersistenceManager
+from game_mechanics import calculate_stat_modifier
+
+class MetaCommandHandler:
+    def __init__(self, persistence_manager: PersistenceManager):
+        self.persistence_manager = persistence_manager
+        
+        self.no_arg_commands = {"quit", "exit", "inventory", "i", "stats", "character", "quests", "journal", "equipment", "eq", "help"}
+        self.arg_commands = {"save", "load"}
+        self.all_commands = self.no_arg_commands.union(self.arg_commands)
+
+
+    def handle_command(self, full_input: str, game_state: GameState, world: GameWorld) -> Tuple[bool, Optional[GameState], Optional[GameWorld]]:
+        command_parts = full_input.lower().split()
+        command = command_parts[0]
+
+        if command not in self.all_commands:
+            return False, game_state, world
+
+        # --- NEW LOGIC TO PREVENT HIJACKING ---
+        # If the command is a no-argument command, it must be the ONLY word.
+        if command in self.no_arg_commands and len(command_parts) > 1:
+            return False, game_state, world
+        
+        # If the command is an argument command, it must have an argument.
+        if command in self.arg_commands and len(command_parts) == 1:
+            print(f"Usage: {command} <name>")
+            return True, game_state, world
+        # --- END OF NEW LOGIC ---
+
+        if command in ["quit", "exit"]:
+            self._handle_quit()
+            return True, None, None
+
+        elif command == "save":
+            self._handle_save(command_parts, game_state, world)
+            return True, game_state, world
+
+        elif command == "load":
+            loaded_data = self._handle_load(command_parts)
+            if loaded_data:
+                return True, loaded_data[0], loaded_data[1]
+            return True, game_state, world
+
+        elif command in ["inventory", "i"]:
+            self._handle_inventory(game_state.player)
+            return True, game_state, world
+        
+        elif command in ["stats", "character"]:
+            self._handle_stats(game_state.player)
+            return True, game_state, world
+        
+        elif command in ["quests", "journal"]:
+            self._handle_quests(game_state)
+            return True, game_state, world
+
+        elif command in ["equipment", "eq"]:
+            self._handle_equipment(game_state.player)
+            return True, game_state, world
+
+        elif command == "help":
+            self._handle_help()
+            return True, game_state, world
+        
+        return False, game_state, world
+
+    def _handle_quit(self):
+        print("Thank you for playing!")
+
+    def _handle_save(self, command_parts: List[str], game_state: GameState, world: GameWorld):
+        if len(command_parts) > 1:
+            slot_name = command_parts[1]
+            if self.persistence_manager.save_game(game_state, world, slot_name):
+                print(f"Game saved to slot '{slot_name}'.")
+            else:
+                print("Failed to save the game.")
+        else:
+            print("Usage: save <slot_name>")
+            
+    def _handle_load(self, command_parts: List[str]) -> Optional[Tuple[GameState, GameWorld]]:
+        if len(command_parts) > 1:
+            slot_name = command_parts[1]
+            loaded_data = self.persistence_manager.load_game(slot_name)
+            if loaded_data:
+                game_state, world = loaded_data
+                current_location = game_state.get_current_location(world)
+                print(f"Game loaded from slot '{slot_name}'.")
+                if current_location:
+                    print(f"\nLocation: {current_location.name}")
+                    print(current_location.description)
+                return game_state, world
+            else:
+                print(f"Failed to load game from slot '{slot_name}'.")
+        else:
+            print("Usage: load <slot_name>")
+        return None
+
+    def _handle_inventory(self, player: Character):
+        print("\n--- Inventory ---")
+        if not player.inventory:
+            print("You are carrying nothing.")
+        else:
+            for item in player.inventory:
+                print(f" - {item.name} (Value: {item.value})")
+        print(f"Coin: {player.money} copper pieces")
+        print("-----------------")
+
+
+    def _handle_stats(self, player: Character):
+        print(f"\n--- Character Sheet ---")
+        print(f"Name: {player.name}")
+        print(f"HP: {player.hp} / {player.max_hp}")
+        print(f"Level: {player.level} ({player.xp}/{player.xp_to_next_level} XP)")
+        print(f"Armor Class: {player.get_total_armor_class()}")
+        print("\nAttributes:")
+        for stat, value in player.stats.items():
+            modifier = calculate_stat_modifier(value)
+            print(f"  - {stat.capitalize():>12}: {value} ({modifier:+.0f})")
+        print("-----------------------")
+
+    def _handle_equipment(self, player: Character):
+        print("\n--- Equipped Items ---")
+        equipped_any = False
+        all_slots = ["main_hand", "off_hand", "head", "chest", "legs", "feet", "hands", "amulet", "ring"]
+        for slot in all_slots:
+            item = player.equipment.get(slot)
+            if item:
+                print(f"  - {slot.replace('_', ' ').title():>9}: {item.name}")
+                equipped_any = True
+        
+        if not equipped_any:
+            print("You have nothing equipped.")
+        print("----------------------")
+        
+    def _handle_quests(self, game_state: GameState):
+        print("\n--- Quest Journal ---")
+        active_quests = [q for q in game_state.quest_log.values() if q.status == "active"]
+        
+        if not active_quests:
+            print("You have no active quests.")
+        else:
+            for quest in active_quests:
+                print(f"\n[ {quest.name} ]")
+                print(f"  {quest.description}")
+                for objective in quest.objectives:
+                    status_marker = "[X]" if objective.is_complete else "[ ]"
+                    print(f"    {status_marker} {objective.description}")
+        print("--------------------")
+
+    def _handle_help(self):
+        print("\n--- Help Menu ---")
+        print("This is a text adventure game where you type commands to interact with the world.")
+        print("Try to phrase your actions naturally, for example: 'talk to the blacksmith' or 'attack the goblin with my sword'.")
+        print("\nMeta-Commands (commands that are not part of the game world):")
+        print("  - inventory (i)    : Show your inventory and money.")
+        print("  - stats/character  : Display your character sheet.")
+        print("  - equipment (eq)   : Show your currently equipped items.")
+        print("  - quests/journal   : Display your active quests.")
+        print("  - save <name>      : Save the game to a slot named <name>.")
+        print("  - load <name>      : Load the game from slot <name>.")
+        print("  - quit/exit        : Exit the game.")
+        print("\nCommon in-game actions:")
+        print("  - look / look at <thing>  : Observe your surroundings or something specific.")
+        print("  - take <item>             : Pick up an item.")
+        print("  - drop <item>             : Drop an item from your inventory.")
+        print("  - equip <item>            : Equip an item from your inventory.")
+        print("  - unequip <item>          : Unequip an item and return it to inventory.")
+        print("  - talk to <person>        : Start a conversation.")
+        print("  - attack <target>         : Initiate combat.")
+        print("-----------------")
+
+FILE: persistence.py
+import json
+import logging
+from pathlib import Path
+from typing import Optional, List, Tuple
+
+from game_state import GameState, GameWorld, Character, Item, Location
+
+class PersistenceManager:
+    def __init__(self, save_directory: str = "saves"):
+        self.save_path = Path(save_directory)
+        self.save_path.mkdir(parents=True, exist_ok=True)
+        logging.info(f"PersistenceManager initialized. Save directory: '{self.save_path.resolve()}'")
+
+    def get_save_file_path(self, slot_name: str) -> Path:
+        return self.save_path / f"{slot_name}.json"
+
+    def list_save_games(self) -> List[str]:
+        return [p.stem for p in self.save_path.glob("*.json")]
+
+    def save_game(self, game_state: GameState, world: GameWorld, slot_name: str) -> bool:
+        file_path = self.get_save_file_path(slot_name)
+        logging.info(f"Attempting to save game to '{file_path}'...")
+        try:
+            full_save_data = {
+                "game_state": game_state.to_dict(),
+                "game_world": world.to_dict()
+            }
+            with open(file_path, 'w') as f:
+                json.dump(full_save_data, f, indent=4)
+            logging.info(f"Game successfully saved to slot '{slot_name}'.")
+            return True
+        except (IOError, TypeError) as e:
+            logging.error(f"Failed to save game to slot '{slot_name}'. Error: {e}")
+            return False
+
+    def load_game(self, slot_name: str) -> Optional[Tuple[GameState, GameWorld]]:
+        file_path = self.get_save_file_path(slot_name)
+        if not file_path.exists():
+            logging.warning(f"No save file found for slot '{slot_name}'.")
+            return None
+
+        logging.info(f"Attempting to load game from '{file_path}'...")
+        try:
+            with open(file_path, 'r') as f:
+                data = json.load(f)
+
+            world_data = data['game_world']
+            rebuilt_locations = {}
+            for loc_id, loc_data in world_data['locations'].items():
+                rebuilt_locations[loc_id] = self._rebuild_location(loc_data)
+            
+            world = GameWorld(locations=rebuilt_locations)
+
+            state_data = data['game_state']
+            player = self._rebuild_character(state_data['player'])
+            
+            game_state = GameState(
+                player=player,
+                current_location_id=state_data['current_location_id'],
+                turn_count=state_data.get('turn_count', 0),
+                minutes_elapsed=state_data.get('minutes_elapsed', 480)
+            )
+            
+            logging.info(f"Game successfully loaded from slot '{slot_name}'.")
+            return game_state, world
+
+        except (IOError, json.JSONDecodeError, KeyError, TypeError) as e:
+            logging.error(f"Failed to load game from '{file_path}'. File may be corrupt. Error: {e}")
+            return None
+    
+    def _rebuild_character(self, char_data: dict) -> Character:
+        inventory = [Item(**item) for item in char_data.get('inventory', [])]
+        
+        # Default HP to max_hp for backward compatibility with old saves
+        max_hp = char_data.get('max_hp', 20)
+        hp = char_data.get('hp', max_hp)
+
+        return Character(
+            name=char_data['name'],
+            description=char_data['description'],
+            stats=char_data['stats'],
+            inventory=inventory,
+            mood=char_data.get('mood', 'neutral'),
+            memory=char_data.get('memory', []),
+            hp=hp,
+            max_hp=max_hp,
+            status_effects=char_data.get('status_effects', [])
+        )
+
+    def _rebuild_location(self, loc_data: dict) -> Location:
+        items = [Item(**item) for item in loc_data.get('items', [])]
+        characters = [self._rebuild_character(char) for char in loc_data.get('characters', [])]
+        return Location(
+            id=loc_data['id'],
+            name=loc_data['name'],
+            description=loc_data['description'],
+            characters=characters,
+            items=items,
+            exits=loc_data.get('exits', {})
+        )
+
+FILE: progression_manager.py
+import logging
+from typing import Dict, Any
+
+from definitions.entities import Character
+from game_state import GameState
+
+class ProgressionManager:
+
+    def award_xp(self, game_state: GameState, amount: int):
+        if amount <= 0:
+            return
+
+        player = game_state.player
+        player.xp += amount
+        logging.info(f"Player awarded {amount} XP. Total XP: {player.xp}")
+        print(f"\n[You gained {amount} experience points!]")
+
+        self.check_for_levelup(game_state)
+
+    def check_for_levelup(self, game_state: GameState):
+        player = game_state.player
+        
+        leveled_up = False
+        while player.xp >= player.xp_to_next_level:
+            leveled_up = True
+            
+            # Carry over excess XP
+            player.xp -= player.xp_to_next_level
+            
+            player.level += 1
+            
+            # Increase XP requirement for the next level (e.g., 50% more)
+            player.xp_to_next_level = int(player.xp_to_next_level * 1.5)
+            
+            logging.info(f"Player leveled up to Level {player.level}!")
+            self._apply_level_up_bonuses(player)
+        
+        if leveled_up:
+            print(f"\n[Congratulations! You have reached Level {player.level}!]")
+            print(f"  Max HP increased to {player.max_hp}.")
+            print(f"  All your stats have increased by 1.")
+            print(f"  You feel stronger.")
+
+    def _apply_level_up_bonuses(self, player: Character):
+        # Simple level up: +1 to all stats and +5 to max HP
+        
+        player.max_hp += 5
+        player.hp = player.max_hp # Full heal on level up
+        
+        for stat in player.stats:
+            player.stats[stat] += 1
+            
+        # A more complex system could offer choices:
+        # e.g., "Choose one stat to increase by 2"
+        # This would require prompting the user for input here.
+
+FILE: quest_manager.py
+import logging
+from typing import Dict, Any
+
+from definitions.quests import Quest, Objective
+from game_state import GameState
+
+class QuestManager:
+
+    def start_quest(self, game_state: GameState, quest_data: Dict[str, Any]):
+        quest_id = quest_data.get("id")
+        if not quest_id or quest_id in game_state.quest_log:
+            logging.warning(f"Attempted to start duplicate or invalid quest: {quest_id}")
+            return
+
+        objectives = [Objective(**obj_data) for obj_data in quest_data.get("objectives", [])]
+        
+        new_quest = Quest(
+            id=quest_id,
+            name=quest_data.get("name", "Unnamed Quest"),
+            description=quest_data.get("description", ""),
+            objectives=objectives
+        )
+        
+        game_state.quest_log[quest_id] = new_quest
+        logging.info(f"Quest '{new_quest.name}' started for player.")
+        print(f"\n[New Quest Started: {new_quest.name}]")
+        print(f"  {new_quest.description}")
+
+    def check_for_updates(self, game_state: GameState, intent: str, result: str, intent_data: Dict[str, Any]):
+        if "Success" not in result and "Victory" not in result:
+            return 
+
+        for quest in game_state.quest_log.values():
+            if quest.status != "active":
+                continue
+            
+            needs_completion_check = False
+            for objective in quest.objectives:
+                if objective.is_complete:
+                    continue
+                
+                was_updated = self._check_objective(objective, intent, result, intent_data, game_state)
+                if was_updated:
+                    needs_completion_check = True
+
+            if needs_completion_check:
+                if all(obj.is_complete for obj in quest.objectives):
+                    self._complete_quest(quest)
+
+    def _check_objective(self, objective: Objective, intent: str, result: str, intent_data: Dict[str, Any], game_state: GameState) -> bool:
+        
+        target_match = False
+
+        if objective.type == "acquire_item" and intent == "take_item":
+            item_name = intent_data.get("target")
+            if item_name and objective.target.lower() in item_name.lower():
+                target_match = True
+
+        elif objective.type == "kill_target" and result == "Victory":
+            if game_state.combat_state and objective.target in game_state.combat_state.get("participants", []):
+                 target_match = True
+
+        elif objective.type == "reach_location" and intent == "move":
+            if game_state.current_location_id == objective.target:
+                target_match = True
+
+        elif objective.type == "give_item" and intent == "give_item":
+            item_name = intent_data.get("target")
+            recipient_name = intent_data.get("recipient")
+            required_recipient = objective.details.get("recipient")
+            if (item_name and objective.target.lower() in item_name.lower() and
+                recipient_name and required_recipient and required_recipient.lower() in recipient_name.lower()):
+                 target_match = True
+
+        if target_match:
+            objective.current_count += 1
+            if objective.current_count >= objective.required_count:
+                objective.is_complete = True
+                logging.info(f"Quest '{objective.id}' objective completed.")
+                print(f"\n[Objective Complete: {objective.description}]")
+                return True
+        
+        return False
+
+    def _complete_quest(self, quest: Quest):
+        quest.status = "completed"
+        logging.info(f"Quest '{quest.name}' has been completed by the player.")
+        print(f"\n[Quest Complete: {quest.name}]")
+
+        # Hook for progression manager
+
+FILE: reputation_manager.py
+import logging
+from typing import Dict, Any, Optional
+
+from game_state import GameState, Character
+
+class ReputationManager:
+    
+    def __init__(self):
+        logging.info("ReputationManager initialized.")
+        # Define how much reputation changes for specific actions.
+        # This can be expanded with more intents and factions.
+        self.reputation_map = {
+            "town_guard": {
+                "give_item": 5,
+                "attack": -50,
+            },
+            "thieves_guild": {
+                "attack": -20,
+                "give_item": 2, # They might be suspicious
+            }
+        }
+
+    def process_event(self, game_state: GameState, intent: str, target: Optional[Character] = None):
+        """
+        Updates player's reputation based on an action taken.
+        """
+        if not target or not target.faction:
+            return
+
+        faction = target.faction
+        intent_effects = self.reputation_map.get(faction)
+
+        if not intent_effects:
+            return
+
+        reputation_change = intent_effects.get(intent, 0)
+
+        if reputation_change != 0:
+            self._adjust_reputation(game_state, faction, reputation_change)
+
+    def _adjust_reputation(self, game_state: GameState, faction: str, amount: int):
+        """
+        Safely adjusts the reputation for a given faction.
+        """
+        if faction not in game_state.reputation:
+            game_state.reputation[faction] = 0
+        
+        game_state.reputation[faction] += amount
+        
+        logging.info(f"Reputation with '{faction}' changed by {amount}. New reputation: {game_state.reputation[faction]}.")
+        if amount > 0:
+            print(f"[Your reputation with {faction.replace('_', ' ').title()} has increased.]")
+        else:
+            print(f"[Your reputation with {faction.replace('_', ' ').title()} has decreased.]")
+            
+    def get_reputation_level(self, game_state: GameState, faction: str) -> str:
+        """
+        Translates a numerical reputation score into a descriptive level.
+        """
+        score = game_state.reputation.get(faction, 0)
+        
+        if score > 50:
+            return "revered"
+        elif score > 20:
+            return "trusted"
+        elif score > 5:
+            return "friendly"
+        elif score < -50:
+            return "hated"
+        elif score < -20:
+            return "disliked"
+        elif score < -5:
+            return "unfriendly"
+        else:
+            return "neutral"
+
+FILE: requirements.txt
+# requirements.txt
+
+# This file lists the Python packages required by this project.
+# To install all dependencies, run the following command in your activated virtual environment:
+# pip install -r requirements.txt
+
+google-generativeai
+
+FILE: world_loader.py
+import json
+import logging
+from typing import Dict
+from pathlib import Path
+
+from game_state import GameWorld, Location, Character, Item
+
+class WorldLoader:
+    def __init__(self, locations_data_dir: str):
+        self.locations_path = Path(locations_data_dir)
+
+    def load_world(self) -> GameWorld:
+        logging.info(f"Loading world data from directory '{self.locations_path}'...")
+        
+        rebuilt_locations = {}
+        try:
+            if not self.locations_path.is_dir():
+                raise FileNotFoundError(f"The specified location directory does not exist: {self.locations_path}")
+
+            for location_file in self.locations_path.glob("*.json"):
+                logging.info(f"  - Loading location file: {location_file.name}")
+                with open(location_file, 'r') as f:
+                    loc_data = json.load(f)
+                
+                loc_id = loc_data.get("id")
+                if not loc_id:
+                    logging.warning(f"    - SKIPPING: Location file {location_file.name} is missing a required 'id'.")
+                    continue
+                
+                rebuilt_locations[loc_id] = self._rebuild_location(loc_data)
+            
+            if not rebuilt_locations:
+                raise ValueError("No valid location files were found in the specified directory.")
+
+            world = GameWorld(locations=rebuilt_locations)
+            logging.info("World data loaded and objects built successfully.")
+            return world
+
+        except (IOError, json.JSONDecodeError, KeyError, FileNotFoundError, ValueError) as e:
+            logging.critical(f"Failed to load or parse world data. Error: {e}")
+            raise
+
+    def _rebuild_character(self, char_data: Dict) -> Character:
+        max_hp = char_data.get('max_hp', 20)
+        hp = char_data.get('hp', max_hp)
+
+        return Character(
+            name=char_data['name'],
+            description=char_data['description'],
+            stats=char_data['stats'],
+            inventory=char_data.get('inventory', []), # NPCs can have starting items
+            mood=char_data.get('mood', 'neutral'),
+            memory=char_data.get('memory', []),
+            hp=hp,
+            max_hp=max_hp,
+            status_effects=char_data.get('status_effects', [])
+        )
+
+    def _rebuild_location(self, loc_data: Dict) -> Location:
+        items = [Item(**item) for item in loc_data.get('items', [])]
+        characters = [self._rebuild_character(char) for char in loc_data.get('characters', [])]
+        return Location(
+            id=loc_data['id'],
+            name=loc_data['name'],
+            description=loc_data['description'],
+            characters=characters,
+            items=items,
+            exits=loc_data.get('exits', {})
+        )
+
+FILE: action_handlers/__init__.py
+
+
+FILE: action_handlers/combat_handler.py
+import logging
+import random
+from typing import Dict, Any, TYPE_CHECKING, List, Optional
+
+from definitions.entities import Character
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class CombatHandler:
+
+    def process_combat_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        intent = intent_data.get("intent")
+
+        if not game_state.combat_state and intent == "attack":
+            return self._initiate_combat(game_state, world, ai_manager, intent_data)
+
+        if game_state.combat_state:
+            active_char_name = game_state.combat_state["participants"][game_state.combat_state["turn_index"]]
+            if active_char_name != game_state.player.name:
+                logging.error("Received player combat intent when it was not the player's turn.")
+                return f"Failure: It is not your turn. {active_char_name} is acting."
+
+            if intent == "attack":
+                target_name = intent_data.get("target")
+                if not target_name:
+                    return "Failure: You must specify a target to attack."
+
+                participants = self._get_combat_participants(game_state, world)
+                target = next((p for p in participants if p.name.lower() == target_name.lower() and p != game_state.player), None)
+                if not target:
+                    return f"Failure: '{target_name}' is not in this fight."
+
+                attack_narration = self._execute_attack(game_state, game_state.player, target)
+                game_state.combat_state["turn_index"] += 1
+                return self._run_combat_loop(game_state, world, ai_manager, initial_narration=attack_narration)
+            
+            return "Failure: That is not a valid action in combat."
+
+        logging.warning(f"CombatHandler received an unhandled intent: {intent}")
+        return "Failure: You can't do that right now."
+
+    def _initiate_combat(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        target_name = intent_data.get("target")
+        if not target_name:
+            return "Failure: Who are you trying to attack?"
+
+        target = game_state.find_character_in_location(target_name, world)
+        if not target:
+            return f"Failure: You don't see '{target_name}' here."
+
+        if target == game_state.player:
+            return "Failure: You decide against attacking yourself."
+
+        logging.info(f"Combat initiated by player against '{target.name}'.")
+
+        location = game_state.get_current_location(world)
+        if not location:
+            logging.error("Cannot initiate combat in a non-existent location.")
+            return "Failure: You cannot fight in the void."
+
+        initial_participants = [game_state.player] + [char for char in location.characters if char.is_hostile or char == target]
+        for p in initial_participants:
+            p.is_hostile = True
+
+        turn_order = sorted(initial_participants, key=lambda x: random.randint(1, 20) + (x.stats.get("dexterity", 10) - 10) // 2, reverse=True)
+
+        game_state.combat_state = {
+            "participants": [p.name for p in turn_order],
+            "turn_index": 0,
+            "round_count": 1
+        }
+        
+        initial_narration = f"You draw your weapon and attack {target.name}! Combat has begun."
+        attack_narration = self._execute_attack(game_state, game_state.player, target)
+
+        game_state.combat_state["turn_index"] += 1
+        return self._run_combat_loop(game_state, world, ai_manager, initial_narration=f"{initial_narration}\n{attack_narration}")
+
+    def _get_combat_participants(self, game_state: GameState, world: GameWorld) -> List[Character]:
+        if not game_state.combat_state:
+            return []
+
+        location = game_state.get_current_location(world)
+        if not location:
+            return []
+
+        participant_names = game_state.combat_state.get("participants", [])
+        all_chars = [game_state.player] + location.characters
+        
+        participant_objects = []
+        for name in participant_names:
+            found_char = next((char for char in all_chars if char.name == name), None)
+            if found_char:
+                participant_objects.append(found_char)
+        
+        return participant_objects
+
+    def _run_combat_loop(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', initial_narration: str = "") -> str:
+        narration_log = [initial_narration] if initial_narration else []
+
+        while game_state.combat_state:
+            end_state = self._check_combat_end(game_state, world)
+            if end_state:
+                game_state.combat_state = None
+                narration_log.append(end_state)
+                return "\n".join(filter(None, narration_log))
+
+            turn_index = game_state.combat_state["turn_index"]
+            participant_names = game_state.combat_state["participants"]
+            
+            if turn_index >= len(participant_names):
+                game_state.combat_state["turn_index"] = 0
+                game_state.combat_state["round_count"] += 1
+                narration_log.append(f"--- Round {game_state.combat_state['round_count']} ---")
+                continue
+
+            participants = self._get_combat_participants(game_state, world)
+            if not participants:
+                game_state.combat_state = None
+                return "Victory: The last foe falls, and the dust settles."
+            
+            attacker = participants[turn_index]
+            
+            if attacker.hp <= 0:
+                game_state.combat_state["turn_index"] += 1
+                continue
+
+            if attacker == game_state.player:
+                narration_log.append("It is your turn to act.")
+                return "\n".join(filter(None, narration_log))
+            else:
+                npc_action = self._get_npc_combat_action(attacker, game_state, world, ai_manager)
+                
+                if npc_action and npc_action.get("action") == "attack":
+                    target_name = npc_action.get("target")
+                    target = game_state.player if target_name == game_state.player.name else None
+                    if target:
+                        narration_log.append(self._execute_attack(game_state, attacker, target))
+                else:
+                    narration_log.append(f"{attacker.name} hesitates, unsure what to do.")
+            
+            game_state.combat_state["turn_index"] += 1
+        
+        return "\n".join(filter(None, narration_log))
+
+    def _get_npc_combat_action(self, npc: Character, game_state: GameState, world: GameWorld, ai_manager: 'AIManager') -> Dict[str, Any]:
+        logging.info(f"Getting combat action for NPC '{npc.name}'.")
+        return {
+            "action": "attack",
+            "target": game_state.player.name
+        }
+
+    def _execute_attack(self, game_state: GameState, attacker: Character, target: Character) -> str:
+        def get_attack_roll(char: Character) -> int:
+            modifier = (char.stats.get("strength", 10) - 10) // 2 + char.get_total_attack_bonus()
+            return random.randint(1, 20) + modifier
+        
+        def get_damage_amount(char: Character) -> int:
+            dice_str = char.get_damage_dice()
+            num_dice, dice_size = map(int, dice_str.split('d'))
+            return sum(random.randint(1, dice_size) for _ in range(num_dice))
+
+        attack_roll = get_attack_roll(attacker)
+        target_ac = target.get_total_armor_class()
+
+        if attack_roll >= target_ac:
+            damage = get_damage_amount(attacker)
+            target.hp -= damage
+            logging.info(f"HIT! {attacker.name} attacks {target.name} for {damage} damage. {target.name} HP: {target.hp}/{target.max_hp}")
+            
+            narration = f"{attacker.name}'s attack hits {target.name} for {damage} damage!"
+            if target.hp <= 0:
+                narration += f" {target.name} collapses, defeated!"
+                if game_state.combat_state:
+                    self._remove_defeated_participant(character=target, game_state=game_state)
+            return narration
+        else:
+            logging.info(f"MISS! {attacker.name} attacks {target.name} but fails to hit.")
+            return f"{attacker.name} attacks {target.name} but misses."
+
+    def _check_combat_end(self, game_state: GameState, world: GameWorld) -> Optional[str]:
+        participants = self._get_combat_participants(game_state, world)
+        
+        if game_state.player.hp <= 0:
+            return "Defeat: You have been vanquished."
+
+        living_opponents = [p for p in participants if p != game_state.player and p.hp > 0]
+        if not living_opponents:
+            return "Victory: The last of your foes has been defeated!"
+        
+        return None
+    
+    def _remove_defeated_participant(self, character: Character, game_state: GameState):
+        if game_state.combat_state and character.name in game_state.combat_state["participants"]:
+            current_turn_index = game_state.combat_state["turn_index"]
+            defeated_char_index = -1
+            try:
+                defeated_char_index = game_state.combat_state["participants"].index(character.name)
+            except ValueError:
+                logging.warning(f"Tried to remove defeated participant '{character.name}' who was already removed.")
+                return
+
+            game_state.combat_state["participants"].remove(character.name)
+            
+            if defeated_char_index < current_turn_index:
+                game_state.combat_state["turn_index"] -= 1
+
+FILE: action_handlers/dialogue_handler.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class DialogueHandler:
+
+    def process_dialogue_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        target_name = intent_data.get("target")
+        if not target_name:
+            logging.warning("Dialogue intent was missing a 'target' character.")
+            return "Failure: You need to specify who you want to talk to."
+            
+        npc = game_state.find_character_in_location(target_name, world)
+        if not npc:
+            logging.info(f"Player tried to talk to '{target_name}', but they were not found.")
+            return f"Failure: You don't see '{target_name}' here."
+        
+        topic = intent_data.get("topic")
+        if not topic:
+            # If AI doesn't identify a specific topic, it's a general greeting.
+            topic = f"The player greets {npc.name}."
+            logging.info(f"Player initiated general dialogue with '{npc.name}'.")
+        else:
+            logging.info(f"Player initiated dialogue with '{npc.name}' about '{topic}'.")
+
+        # This part assumes a new function exists in AIManager: generate_dialogue_response
+        # It's responsible for generating the NPC's actual spoken lines.
+        # This keeps the AI logic neatly within the AIManager.
+        dialogue_response = ai_manager.generate_dialogue_response(
+            game_state=game_state,
+            world=world,
+            npc=npc,
+            topic=topic
+        )
+
+        if dialogue_response:
+            # The narration from the main loop will describe the action, 
+            # and we inject the NPC's response directly into it.
+            return f"Success: Dialogue - {dialogue_response}"
+        else:
+            logging.error(f"AI failed to generate dialogue response for NPC '{npc.name}'.")
+            return "Failure: They don't seem to respond."
+
+FILE: action_handlers/equipment_handler.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from definitions.entities import Character, Item
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class EquipmentHandler:
+
+    def process_equipment_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        intent = intent_data.get("intent")
+        
+        if intent == "equip":
+            return self._handle_equip(game_state, intent_data)
+        elif intent == "unequip":
+            return self._handle_unequip(game_state, intent_data)
+        
+        logging.warning(f"EquipmentHandler received an unhandled intent: {intent}")
+        return "Failure: The world doesn't know how to do that."
+
+    def _find_item_in_inventory(self, player: Character, item_name: str) -> Item | None:
+        if not player.inventory: return None
+        for item in player.inventory:
+            if item_name.lower() in item.name.lower():
+                return item
+        return None
+
+    def _handle_equip(self, game_state: GameState, intent_data: Dict[str, Any]) -> str:
+        item_name = intent_data.get("target")
+        if not item_name:
+            return "Failure: You need to specify what item to equip."
+
+        item_to_equip = self._find_item_in_inventory(game_state.player, item_name)
+        if not item_to_equip:
+            return f"Failure: You do not have a '{item_name}' in your inventory."
+        
+        slot = item_to_equip.equipment_slot
+        if not slot:
+            return f"Failure: The {item_to_equip.name} is not something you can equip."
+
+        # Unequip any item currently in that slot
+        currently_equipped_item = game_state.player.equipment.get(slot)
+        if currently_equipped_item:
+            game_state.player.equipment[slot] = None
+            game_state.player.add_item_to_inventory(currently_equipped_item)
+            logging.info(f"Player automatically unequipped '{currently_equipped_item.name}' to make room for '{item_to_equip.name}'.")
+
+        # Equip the new item
+        game_state.player.equipment[slot] = item_to_equip
+        game_state.player.remove_item_from_inventory(item_to_equip)
+        logging.info(f"Player equipped '{item_to_equip.name}' into slot '{slot}'.")
+
+        return f"Success: Equipped {item_to_equip.name}"
+
+    def _handle_unequip(self, game_state: GameState, intent_data: Dict[str, Any]) -> str:
+        item_name = intent_data.get("target")
+        if not item_name:
+            return "Failure: You need to specify what item to unequip."
+
+        item_to_unequip = None
+        target_slot = None
+
+        # Find the item in the equipment slots
+        for slot, item in game_state.player.equipment.items():
+            if item and item_name.lower() in item.name.lower():
+                item_to_unequip = item
+                target_slot = slot
+                break
+
+        if not item_to_unequip or not target_slot:
+            return f"Failure: You do not have a '{item_name}' equipped."
+        
+        # Move item from equipment to inventory
+        game_state.player.equipment[target_slot] = None
+        game_state.player.add_item_to_inventory(item_to_unequip)
+        logging.info(f"Player unequipped '{item_to_unequip.name}' from slot '{target_slot}'.")
+
+        return f"Success: Unequipped {item_to_unequip.name}"
+
+FILE: action_handlers/interaction_handler.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from definitions.entities import Item
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class InteractionHandler:
+
+    def process_interaction_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        intent = intent_data.get("intent")
+        
+        if intent == "interact":
+            return self._handle_interact(game_state, world, intent_data)
+        elif intent == "look":
+            return self._handle_look(game_state, world, intent_data)
+        
+        logging.warning(f"InteractionHandler received an unhandled intent: {intent}")
+        return "Failure: The world doesn't know how to do that."
+    
+    def _handle_look(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        target_name = intent_data.get("target")
+
+        if not target_name:
+            logging.info("Player looked at surroundings (no specific target).")
+            return "Automatic Success: Look at surroundings"
+
+        target_obj, obj_type = None, None
+        
+        found_in_location = game_state.find_in_location(target_name, world)
+        if found_in_location:
+            target_obj, obj_type = found_in_location
+        
+        if not target_obj and game_state.player.inventory:
+            player_item = next((item for item in game_state.player.inventory if target_name.lower() in item.name.lower()), None)
+            if player_item:
+                target_obj = player_item
+                obj_type = "item_in_inventory"
+        
+        if not target_obj:
+            return f"Failure: You don't see any '{target_name}' here."
+
+        return f"Success: Look at {obj_type} - {target_obj.name}"
+
+    def _handle_interact(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        target_name = intent_data.get("target")
+        if not target_name:
+            return "Failure: You need to specify what to interact with."
+
+        found_in_location = game_state.find_in_location(target_name, world)
+        if not found_in_location:
+            return f"Failure: You can't seem to find a '{target_name}' here."
+
+        target_obj, obj_type = found_in_location
+        if obj_type != "interactable":
+            return f"Failure: You can't seem to interact with the '{target_name}' in that way."
+
+        if target_obj.state.get("locked"):
+            return f"Failure: The {target_obj.name} is locked."
+
+        if 'container' in target_obj.state:
+            if not target_obj.state.get('opened'):
+                target_obj.state['opened'] = True
+                logging.info(f"Player opened container '{target_obj.name}'.")
+                
+                location = game_state.get_current_location(world)
+                if not location: return "Failure: Cannot interact without a valid location."
+
+                loot = target_obj.state.get('container', [])
+                if loot:
+                    for item_data in loot:
+                        location.items.append(Item(**item_data))
+                    target_obj.state['container'] = []
+                    return "Success: Open and loot"
+                else:
+                    return "Success: Open empty"
+            else:
+                return "Failure: It is already open."
+        
+        if 'toggled' in target_obj.state:
+            current_state = target_obj.state['toggled']
+            target_obj.state['toggled'] = not current_state
+            logging.info(f"Player toggled '{target_obj.name}' from {current_state} to {not current_state}.")
+            return "Success"
+            
+        return f"Failure: You're not sure how to interact with the {target_obj.name}."
+
+FILE: action_handlers/item_handler.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from definitions.entities import Character, Item
+from game_state import GameState, GameWorld
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class ItemHandler:
+
+    def process_item_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        intent = intent_data.get("intent")
+        
+        if intent == "use_item":
+            return self._handle_use_item(game_state, world, intent_data)
+        elif intent == "drop_item":
+            return self._handle_drop_item(game_state, world, intent_data)
+        elif intent == "give_item":
+            return self._handle_give_item(game_state, world, intent_data)
+        
+        logging.warning(f"ItemHandler received an unhandled intent: {intent}")
+        return "Failure: The world doesn't know how to do that."
+
+    def _find_item_in_inventory(self, player: Character, item_name: str) -> Item | None:
+        if not player.inventory: return None
+        for item in player.inventory:
+            if item_name.lower() in item.name.lower():
+                return item
+        return None
+
+    def _handle_use_item(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        item_name = intent_data.get("target")
+        if not item_name:
+            return "Failure: You need to specify what item to use."
+
+        item_to_use = self._find_item_in_inventory(game_state.player, item_name)
+        if not item_to_use:
+            return f"Failure: You do not have a '{item_name}'."
+        
+        if not item_to_use.use_effect:
+            return f"Failure: The {item_to_use.name} doesn't seem to have a use."
+
+        effect_op = item_to_use.use_effect.get("op")
+        if effect_op == "heal":
+            amount = item_to_use.use_effect.get("amount", 0)
+            game_state.player.hp = min(game_state.player.max_hp, game_state.player.hp + amount)
+            logging.info(f"Player used {item_to_use.name}, healing for {amount}. New HP: {game_state.player.hp}")
+            if item_to_use.category == "potion":
+                game_state.player.remove_item_from_inventory(item_to_use)
+            return "Success"
+
+        elif effect_op == "unlock":
+            target_on_name = intent_data.get("target_on")
+            if not target_on_name:
+                return "Failure: What do you want to use the key on?"
+            
+            found_in_location = game_state.find_in_location(target_on_name, world)
+            if not found_in_location:
+                 return f"Failure: You don't see a '{target_on_name}' to use this on."
+            
+            target_obj, obj_type = found_in_location
+            if obj_type != "interactable":
+                return f"Failure: You can't use the key on a {obj_type}."
+
+            if item_to_use.unlocks_id == target_obj.id and target_obj.state.get("locked"):
+                target_obj.state["locked"] = False
+                logging.info(f"Player used {item_to_use.name} to unlock {target_obj.name}.")
+                return "Success"
+            else:
+                return f"Failure: It doesn't seem to work on the {target_obj.name}."
+
+        return f"Failure: You can't figure out how to use the {item_to_use.name}."
+
+    def _handle_drop_item(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        item_name = intent_data.get("target")
+        if not item_name:
+            return "Failure: You need to specify what to drop."
+
+        item_to_drop = self._find_item_in_inventory(game_state.player, item_name)
+        if not item_to_drop:
+            return f"Failure: You do not have a '{item_name}'."
+
+        location = game_state.get_current_location(world)
+        if not location:
+            return "Failure: You are in a void and cannot drop things here."
+        
+        game_state.player.remove_item_from_inventory(item_to_drop)
+        location.items.append(item_to_drop)
+        logging.info(f"Player dropped '{item_to_drop.name}' in '{location.id}'.")
+        return "Success"
+
+    def _handle_give_item(self, game_state: GameState, world: GameWorld, intent_data: Dict[str, Any]) -> str:
+        item_name = intent_data.get("target")
+        recipient_name = intent_data.get("recipient")
+
+        if not item_name or not recipient_name:
+            return "Failure: You need to specify both an item and who to give it to."
+        
+        item_to_give = self._find_item_in_inventory(game_state.player, item_name)
+        if not item_to_give:
+            return f"Failure: You do not have a '{item_name}'."
+        
+        recipient = game_state.find_character_in_location(recipient_name, world)
+        if not recipient:
+            return f"Failure: You don't see '{recipient_name}' here."
+
+        game_state.player.remove_item_from_inventory(item_to_give)
+        recipient.add_item_to_inventory(item_to_give)
+        logging.info(f"Player gave '{item_to_give.name}' to NPC '{recipient.name}'.")
+        return "Success"
+
+FILE: action_handlers/quest_handler.py
+import logging
+from typing import Dict, Any, TYPE_CHECKING
+
+from game_state import GameState, GameWorld
+from quest_manager import QuestManager
+
+if TYPE_CHECKING:
+    from ai_manager import AIManager
+
+class QuestHandler:
+
+    def __init__(self, quest_manager: QuestManager):
+        self.quest_manager = quest_manager
+
+    def process_quest_intent(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        action_type = intent_data.get("action_type")
+        
+        if action_type == "accept":
+            return self._handle_accept_quest(game_state, world, ai_manager, intent_data)
+        
+        # Future actions like "decline" or "inquire" can be added here
+        # elif action_type == "decline":
+        #     return "Success: You declined the offer."
+        
+        logging.warning(f"QuestHandler received an unhandled action_type: {action_type}")
+        return "Failure: You're not sure how to respond to that."
+
+    def _handle_accept_quest(self, game_state: GameState, world: GameWorld, ai_manager: 'AIManager', intent_data: Dict[str, Any]) -> str:
+        quest_giver_name = intent_data.get("target")
+        if not quest_giver_name:
+            return "Failure: The AI could not determine who gave the quest."
+
+        quest_giver = game_state.find_character_in_location(quest_giver_name, world)
+        if not quest_giver:
+            return f"Failure: You don't see {quest_giver_name} here to accept a quest from."
+
+        # Find the relevant memory from the quest giver that contains the offer
+        quest_offer_memory = None
+        for memory in reversed(quest_giver.memory):
+            if "offered" in memory.lower() and "work" in memory.lower() or "quest" in memory.lower():
+                quest_offer_memory = memory
+                break
+        
+        if not quest_offer_memory:
+            return "Failure: They don't seem to recall offering you any work."
+
+        # Ask the AI to formalize the quest based on the memory
+        # This assumes a new function in AIManager: generate_quest_from_context
+        quest_data = ai_manager.generate_quest_from_context(quest_giver, quest_offer_memory)
+
+        if not quest_data:
+            logging.error(f"AI failed to generate quest data from memory: '{quest_offer_memory}'")
+            return "Failure: There was a misunderstanding about the details of the job."
+            
+        self.quest_manager.start_quest(game_state, quest_data)
+        
+        return "Success: Quest Accepted"
+
+FILE: definitions/__init__.py
+
+
+FILE: definitions/entities.py
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
+
+@dataclass
+class Item:
+    name: str
+    description: str
+    category: str = "misc"
+    value: int = 0
+    
+    equipment_slot: Optional[str] = None
+    stat_bonuses: Dict[str, int] = field(default_factory=dict)
+
+    use_effect: Dict[str, Any] = field(default_factory=dict)
+    damage_dice: Optional[str] = None
+    damage_type: Optional[str] = None
+    unlocks_id: Optional[str] = None
+    owner: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "category": self.category,
+            "value": self.value,
+            "equipment_slot": self.equipment_slot,
+            "stat_bonuses": self.stat_bonuses,
+            "use_effect": self.use_effect,
+            "damage_dice": self.damage_dice,
+            "damage_type": self.damage_type,
+            "unlocks_id": self.unlocks_id,
+            "owner": self.owner,
+        }
+
+@dataclass
+class Character:
+    name: str
+    description: str
+    stats: Dict[str, int]
+    inventory: List[Item] = field(default_factory=list)
+    equipment: Dict[str, Optional[Item]] = field(default_factory=dict)
+    
+    mood: str = "neutral"
+    memory: List[str] = field(default_factory=list)
+    hp: int = 20
+    max_hp: int = 20
+    status_effects: List[str] = field(default_factory=list)
+    
+    level: int = 1
+    xp: int = 0
+    xp_to_next_level: int = 100
+    money: int = 10
+    
+    base_armor_class: int = 10
+    base_attack_bonus: int = 0
+    is_hostile: bool = False
+
+    faction: Optional[str] = None
+    schedule: Optional[Dict[str, str]] = None
+    is_hidden: bool = False
+
+    def get_total_armor_class(self) -> int:
+        ac_bonus = 0
+        for item in self.equipment.values():
+            if item:
+                ac_bonus += item.stat_bonuses.get("armor_class", 0)
+        return self.base_armor_class + ac_bonus
+
+    def get_total_attack_bonus(self) -> int:
+        bonus = 0
+        main_hand = self.equipment.get("main_hand")
+        if main_hand:
+            bonus += main_hand.stat_bonuses.get("attack_bonus", 0)
+        return self.base_attack_bonus + bonus
+
+    def get_damage_dice(self) -> str:
+        main_hand = self.equipment.get("main_hand")
+        if main_hand and main_hand.damage_dice:
+            return main_hand.damage_dice
+        return "1d4" 
+
+    def add_item_to_inventory(self, item: Item):
+        self.inventory.append(item)
+
+    def remove_item_from_inventory(self, item: Item):
+        self.inventory.remove(item)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "stats": self.stats,
+            "inventory": [item.to_dict() for item in self.inventory],
+            "equipment": {slot: item.to_dict() for slot, item in self.equipment.items() if item},
+            "mood": self.mood,
+            "memory": self.memory,
+            "hp": self.hp,
+            "max_hp": self.max_hp,
+            "status_effects": self.status_effects,
+            "level": self.level,
+            "xp": self.xp,
+            "xp_to_next_level": self.xp_to_next_level,
+            "money": self.money,
+            "base_armor_class": self.base_armor_class,
+            "base_attack_bonus": self.base_attack_bonus,
+            "is_hostile": self.is_hostile,
+            "faction": self.faction,
+            "schedule": self.schedule,
+            "is_hidden": self.is_hidden,
+        }
+
+FILE: definitions/quests.py
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
+
+@dataclass
+class Objective:
+    id: str
+    description: str
+    type: str 
+    target: str 
+    required_count: int = 1
+    current_count: int = 0
+    is_complete: bool = False
+    details: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "description": self.description,
+            "type": self.type,
+            "target": self.target,
+            "required_count": self.required_count,
+            "current_count": self.current_count,
+            "is_complete": self.is_complete,
+            "details": self.details,
+        }
+        
+@dataclass
+class Quest:
+    id: str
+    name: str
+    description: str
+    status: str = "active" 
+    objectives: List[Objective] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "status": self.status,
+            "objectives": [obj.to_dict() for obj in self.objectives]
+        }
+
+FILE: definitions/world_objects.py
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
+
+from definitions.entities import Character, Item
+
+@dataclass
+class Interactable:
+    id: str
+    name: str
+    description: str
+    state: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "state": self.state
+        }
+
+@dataclass
+class Location:
+    id: str
+    name: str
+    description: str
+    characters: List[Character] = field(default_factory=list)
+    items: List[Item] = field(default_factory=list)
+    interactables: List[Interactable] = field(default_factory=list)
+    exits: Dict[str, str] = field(default_factory=dict)
+
+    def remove_item(self, item: Item):
+        self.items.remove(item)
+
+    def add_character(self, character: Character):
+        self.characters.append(character)
+
+    def remove_character(self, character: Character):
+        self.characters.remove(character)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "characters": [char.to_dict() for char in self.characters],
+            "items": [item.to_dict() for item in self.items],
+            "interactables": [i.to_dict() for i in self.interactables],
+            "exits": self.exits,
+        }
+
+FILE: prompts/__init__.py
+# prompts/__init__.py
+from .inference import INFERENCE_PROMPT
+from .mechanics import MECHANICS_PROMPT
+from .narration import NARRATION_PROMPT, NPC_STATE_UPDATE_PROMPT, DIALOGUE_GENERATION_PROMPT
+from .world_building import LOCATION_GENERATION_PROMPT, WORLD_EVENT_PROMPT
+from .quest import QUEST_GENERATION_PROMPT
+
+__all__ = [
+    "INFERENCE_PROMPT",
+    "MECHANICS_PROMPT",
+    "NARRATION_PROMPT",
+    "NPC_STATE_UPDATE_PROMPT",
+    "DIALOGUE_GENERATION_PROMPT",
+    "LOCATION_GENERATION_PROMPT",
+    "WORLD_EVENT_PROMPT",
+    "QUEST_GENERATION_PROMPT"
+]
+
+FILE: prompts/inference.py
+INFERENCE_PROMPT = """
+You are the parser for a text-based RPG. Your job is to analyze the player's command and determine their intent.
+Respond ONLY with a valid JSON object. Do not include any text before or after the JSON.
+
+The possible intents are:
+- "move": The player is trying to move to another location through an exit.
+- "take_item": The player is taking an item from the environment.
+- "drop_item": The player is dropping an item from their inventory.
+- "use_item": The player is using an item. The "target" is the item being used. If it's used ON something else, that is the "target_on".
+- "give_item": The player is giving an item to an NPC. The "target" is the item, and the "recipient" is the character.
+- "attack": The player is initiating combat or attacking a target.
+- "interact": The player is interacting with a non-item, non-character object (e.g., pulling a lever, opening a door).
+- "dialogue": The player is speaking to a character. Include a "topic" field summarizing the core point of their statement (e.g., "asking about work", "commenting on the weather").
+- "look": The player is observing their surroundings or a specific object/character.
+- "pass_time": The player wants to wait or rest. Include a "duration" in minutes.
+- "skill_check": The action is complex, non-standard, and success is not guaranteed (e.g., "I try to climb the slippery wall").
+- "quest_action": The player is performing an action directly related to a quest, like accepting or declining it. Include a field for the "action_type" (e.g., "accept", "decline", "inquire").
+- "other": The action is simple, conversational, and doesn't fit other categories (e.g., "Thanks!", "I'll think about it").
+
+For intents that affect a specific object, character, or exit, include a "target" field.
+
+Example (Dialogue):
+Player Command: "Do you know where I can find the blacksmith?"
+Response:
+{{
+  "intent": "dialogue",
+  "action_description": "The player asks Grog where to find the blacksmith.",
+  "target": "Grog",
+  "topic": "asking for the location of the blacksmith"
+}}
+
+Example (Quest Action):
+Player Command: "I'll take that job."
+Response:
+{{
+  "intent": "quest_action",
+  "action_description": "The player agrees to take on the job offered by Grog.",
+  "action_type": "accept",
+  "target": "Grog"
+}}
+
+Example (Use Item on Object):
+Player Command: "I use the brass key on the wooden chest."
+Response:
+{{
+  "intent": "use_item",
+  "action_description": "The player uses the brass key on the wooden chest.",
+  "target": "brass key",
+  "target_on": "wooden chest"
+}}
+
+Now, analyze the given player command based on the current game state.
+"""
+
+FILE: prompts/mechanics.py
+# prompts/mechanics.py
+
+MECHANICS_PROMPT = """
+You are the rules engine and strict referee of a text-based RPG. Your job is to adjudicate a player's action, determining its difficulty and consequences based on a gritty, low-fantasy world. The player character, Arion, is a non-magical adventurer.
+
+First, you MUST evaluate if the action is plausible for this specific character in this world.
+- If the action requires magic, supernatural powers the player does not possess, or is otherwise nonsensical for a normal human, you MUST set "is_possible" to `false` and provide a "reasoning". Do not set a skill or DC.
+- ONLY if the action is physically plausible for a non-magical adventurer should you set "is_possible" to `true` and define the rest of the skill check.
+
+The full JSON response should define the skill check and the mutations that occur on success or failure.
+- "is_possible": A boolean.
+- "reasoning": (Required if "is_possible" is false) A brief explanation for the impossibility.
+- "skill": (Required if "is_possible" is true) The character stat ("strength", "dexterity", or "intelligence").
+- "dc": (Required if "is_possible" is true) The Difficulty Class (integer: 10-25).
+- "on_success": A list of mutations to apply on success.
+- "on_failure": A list of mutations to apply on failure.
+
+Possible mutation operations (`op`):
+- "damage_player": Deals damage. Requires "amount" and "damage_type".
+- "add_player_status": Adds a status effect. Requires "effect".
+
+Here is the current game state for context:
+{game_state}
+
+Here is the player's described action:
+"{action_description}"
+
+Example 1: Disarming a trap
+Action: "The player tries to disarm a poison dart trap on a chest."
+Response:
+{{
+  "is_possible": true,
+  "skill": "dexterity",
+  "dc": 15,
+  "on_success": [],
+  "on_failure": [
+    {{ "op": "damage_player", "amount": 4, "damage_type": "piercing" }},
+    {{ "op": "add_player_status", "effect": "poisoned" }}
+  ]
+}}
+
+Example 2: Impossible magical action
+Action: "The player attempts to open a portal to hell."
+Response:
+{{
+  "is_possible": false,
+  "reasoning": "Arion is a skilled adventurer, but he possesses no magical ability. Tearing a hole in reality to access other dimensions is far beyond the scope of mortal power."
+}}
+
+Example 3: Impossible physical action
+Action: "The player tries to hold their breath underwater for an hour."
+Response:
+{{
+  "is_possible": false,
+  "reasoning": "Even the most stout warrior cannot hold their breath for anywhere near that long."
+}}
+
+Now, adjudicate the given action and respond with the appropriate JSON.
+"""
+
+FILE: prompts/narration.py
+# prompts/narration.py
+
+NARRATION_PROMPT = """
+You are the Dungeon Master and master storyteller of a text-based RPG.
+You will narrate the outcome of a player's action. Your response should be pure narrative text.
+Be descriptive and engaging. Do not break the fourth wall.
+
+Here is the current game state for context:
+{game_state}
+
+Here is what the player tried to do:
+"{action_description}"
+
+Here is the result of their attempt: {result}
+
+Example 1 (Success):
+Action: "The player attempts to smash down an old wooden door."
+Result: "Success"
+Narration: With a mighty roar, you throw your shoulder against the old wooden door. The frame splinters and the door flies open with a deafening CRACK, revealing the dusty crypt beyond.
+
+Example 2 (Dialogue with friendly NPC):
+Action: "The player asks the friendly guard about recent rumors."
+Result: "Success"
+Narration: The guard, looking pleased to chat, leans in conspiratorially. 'Been quiet, mostly,' he says with a grin, 'though I did hear some odd noises from the old sewer grate last night. Probably just rats... but they sounded big.'
+
+Example 3 (Passing Time):
+Action: "The player rests for the night."
+Result: "Success"
+Narration: You find a relatively quiet corner and settle in, drifting off into an uneasy sleep. Hours pass, and you awaken feeling somewhat refreshed as the first light of dawn filters through the grimy windows.
+
+Now, narrate the outcome for the given action and result.
+"""
+
+DIALOGUE_GENERATION_PROMPT = """
+You are a character acting AI for a text-based RPG. Your job is to respond as a specific Non-Player Character (NPC) based on their personality, mood, memory, and the current situation.
+You must respond ONLY with the dialogue spoken by the character, enclosed in quotes. Do not provide any narration or description outside of the quotes. Be concise.
+
+If the NPC would not speak or would only make a gesture, respond with a short description of their action in the third person, without quotes (e.g., The blacksmith grunts and turns back to his forge.).
+
+Here is the context for the interaction:
+{context}
+
+Now, generate the NPC's response.
+"""
+
+NPC_STATE_UPDATE_PROMPT = """
+You are a character psychology AI for an RPG. Your job is to update an NPC's internal state based on their interaction with the player.
+Based on the player's action and the narrated outcome, determine the NPC's new mood and create a new memory for them.
+
+- "new_mood": Must be one of: "neutral", "friendly", "annoyed", "angry", "scared", "impressed", "grateful".
+- "new_memory": A single, concise string summarizing the key takeaway for the NPC from this interaction.
+
+Respond ONLY with a valid JSON object.
+
+CONTEXT:
+- Current NPC State: {npc_state_json}
+- Player's Action: "{action_description}"
+- Interaction Outcome (Narration): "{narration}"
+
+Now, generate the JSON for the given context.
+"""
+
+FILE: prompts/quest.py
+# prompts/quest.py
+
+QUEST_GENERATION_PROMPT = """
+You are a quest designer for a text-based RPG. Your job is to take a conversational offer made by an NPC and formalize it into a structured quest object.
+You must respond ONLY with a single, valid JSON object and no other text.
+
+The JSON object must have the following top-level keys: "id", "name", "description", and "objectives".
+- "id": A unique, computer-friendly ID for the quest (e.g., "grog_ale_unloading").
+- "name": A short, player-facing name for the quest (e.g., "Grog's Heavy Lifting").
+- "description": A 1-2 sentence description for the player's quest journal.
+- "objectives": A list of one or more objective objects.
+
+Each objective object must have:
+- "id": A unique ID for the objective (e.g., "unload_ale_barrel").
+- "description": A player-facing description (e.g., "Unload an ale barrel").
+- "type": The type of action required (e.g., "interact", "kill_target", "acquire_item").
+- "target": The specific name or ID of the thing to interact with/kill/acquire.
+- "required_count": How many times the action must be performed.
+
+Example Context:
+- Quest Giver Name: "Grog"
+- The quest giver's memory of the offer: "Offered someone work unloading ale barrels for 50 coppers a barrel."
+
+Example Response:
+{{
+    "id": "grog_ale_unloading",
+    "name": "Grog's Heavy Lifting",
+    "description": "Grog the tavernkeep has offered me 50 coppers per barrel to help unload a recent shipment of ale.",
+    "objectives": [
+        {{
+            "id": "unload_ale_barrel",
+            "description": "Unload an ale barrel from the storeroom.",
+            "type": "interact",
+            "target": "ale barrel",
+            "required_count": 5
+        }}
+    ]
+}}
+
+Now, generate the quest JSON for the given context.
+"""
+
+FILE: prompts/world_building.py
+# prompts/world_building.py
+
+LOCATION_GENERATION_PROMPT = """
+You are a world-building AI for a fantasy text-based RPG. Your task is to generate the details of a new location that the player has just entered.
+You must respond ONLY with a single, valid JSON object and no other text.
+
+The JSON object must have the following top-level keys: "id", "name", "description", and "exits".
+- "id": MUST be the exact, unique ID provided in the context.
+- "name": A creative, descriptive name for the location (e.g., "Whispering Woods Clearing").
+- "description": A 2-3 sentence, engaging description of the location and its atmosphere.
+- "exits": A dictionary of possible exits. It MUST contain at least one exit that leads back to the source location.
+- "items" (optional): A list of item objects. Each item object needs a "name" and a "description".
+- "characters" (optional): A list of character objects. Each character needs a "name", "description", "stats", etc.
+
+Now, generate the JSON for the new location based on the following context.
+"""
+
+WORLD_EVENT_PROMPT = """
+You are the simulation engine for a text-based RPG. Your job is to determine if a background event occurs now that time has passed.
+Based on the current time and location, generate a small, logical, background event. If no logical event occurs, respond with an empty JSON object {{}}.
+
+Respond ONLY with a valid JSON object containing two keys: "narration_summary" and "mutations".
+- "narration_summary": A short, third-person sentence describing what happened.
+- "mutations": A list of state change operations. An empty list is valid.
+
+Possible mutation operations (`op`):
+- "move_npc": Requires "character_name" and "new_location_id".
+- "add_character": Requires "location_id" and a full "character" object.
+- "remove_character": Requires "location_id" and "character_name".
+- "update_location_desc": Requires "location_id" and "new_description".
+
+Here is the current game state for context:
+{game_state}
+
+Now, generate an event for the current game state.
+"""
+

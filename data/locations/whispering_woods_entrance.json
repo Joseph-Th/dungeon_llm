@@ -1,0 +1,11 @@
+{
+    "id": "whispering_woods_entrance",
+    "name": "Whispering Woods Entrance",
+    "description": "The cheerful sounds of town fade behind you, replaced by the rustling of leaves and the chirping of unseen birds. A narrow dirt path winds its way between ancient, moss-covered trees.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "the path back to the town gate": "town_gate",
+        "deeper into the woods along the path": "ancient_oak_clearing"
+    }
+}

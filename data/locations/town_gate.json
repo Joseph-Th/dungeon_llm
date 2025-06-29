@@ -1,0 +1,14 @@
+{
+    "id": "town_gate",
+    "name": "Brenhaven Town Gate",
+    "description": "A sturdy stone archway marks the main gate of the town. Two bored-looking guards stand watch, observing the trickle of travelers. A well-worn path leads out into the wilderness.",
+    "characters": [
+        { "name": "Guard Lars", "description": "A young guard who seems more interested in a passing butterfly than his duties.", "stats": { "strength": 12, "dexterity": 11, "intelligence": 9 } },
+        { "name": "Guard Freya", "description": "An older, stern-faced guard with a scar across her cheek. Her eyes miss nothing.", "stats": { "strength": 14, "dexterity": 10, "intelligence": 12 } }
+    ],
+    "items": [],
+    "exits": {
+        "back to the town square": "town_square",
+        "the path leading out of town": "whispering_woods_entrance"
+    }
+}

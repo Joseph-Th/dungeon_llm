@@ -1,0 +1,22 @@
+{
+    "id": "salty_siren_tavern",
+    "name": "The Salty Siren Tavern",
+    "description": "A dimly lit, smoky tavern. The air smells of stale ale and sawdust.",
+    "characters": [
+        {
+            "name": "Grog",
+            "description": "A burly, red-faced man with a permanent scowl. He's polishing a glass with a dirty rag.",
+            "stats": { "strength": 15, "dexterity": 9, "intelligence": 8 }
+        }
+    ],
+    "items": [
+        {
+            "name": "a mysterious amulet",
+            "description": "A silver amulet that hums with a faint, unseen energy."
+        }
+    ],
+    "exits": {
+        "an old, sturdy-looking oak door": "tavern_storeroom",
+        "the main entrance": "town_square"
+    }
+}

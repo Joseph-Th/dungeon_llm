@@ -1,0 +1,10 @@
+{
+    "id": "gloomfang_cave_entrance",
+    "name": "Gloomfang Cave Entrance",
+    "description": "The entrance to the cave is a jagged maw in the rock face, exhaling a draft of cool, damp air that smells of wet stone and decay. Faint scratching noises can be heard from within.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "the path back to the woods": "gloomfang_path"
+    }
+}

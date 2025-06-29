@@ -1,0 +1,11 @@
+{
+    "id": "gloomfang_path",
+    "name": "Gloomfang Path",
+    "description": "This narrow trail is darker and more menacing than the main path. Twisted, thorny vines cover the trees, and the air grows colder. You see the dark opening of a cave set into a rocky hillside.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "back to the sunny clearing": "ancient_oak_clearing",
+        "the dark cave entrance": "gloomfang_cave_entrance"
+    }
+}

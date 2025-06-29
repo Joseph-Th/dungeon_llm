@@ -1,0 +1,15 @@
+{
+    "id": "tavern_storeroom",
+    "name": "Tavern Storeroom",
+    "description": "A cramped, dusty storeroom filled with barrels of ale and crates of dried fish.",
+    "characters": [],
+    "items": [
+        {
+            "name": "a rusty key",
+            "description": "An old iron key, covered in what looks like decades of rust."
+        }
+    ],
+    "exits": {
+        "a grime-covered door back to the tavern": "salty_siren_tavern"
+    }
+}

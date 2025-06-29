@@ -1,0 +1,21 @@
+{
+    "id": "market_stall",
+    "name": "Market Stall",
+    "description": "This stall is overflowing with exotic fruits and strange-smelling spices. A cheerful merchant with a wide smile beckons you closer.",
+    "characters": [
+        {
+            "name": "Elara",
+            "description": "A fast-talking merchant with twinkling eyes.",
+            "stats": { "intelligence": 15 }
+        }
+    ],
+    "items": [
+        {
+            "name": "a pouch of shimmering dust",
+            "description": "The dust glitters with all the colors of the rainbow."
+        }
+    ],
+    "exits": {
+        "back to the town square": "town_square"
+    }
+}

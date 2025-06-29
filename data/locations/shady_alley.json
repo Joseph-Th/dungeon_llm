@@ -1,0 +1,10 @@
+{
+    "id": "shady_alley",
+    "name": "Shady Alleyway",
+    "description": "The sounds of the square fade away in this dark alley. It smells of damp stone and garbage. A loose brick in the wall catches your eye.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "back to the square": "town_square"
+    }
+}

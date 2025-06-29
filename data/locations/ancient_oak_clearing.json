@@ -1,0 +1,12 @@
+{
+    "id": "ancient_oak_clearing",
+    "name": "Ancient Oak Clearing",
+    "description": "The path opens into a small, sun-dappled clearing dominated by a colossal oak tree. Its branches are so thick and tangled they seem to hold up the sky. The path splits here.",
+    "characters": [],
+    "items": [],
+    "exits": {
+        "the path back toward the town": "whispering_woods_entrance",
+        "a path leading towards a river": "sparkleflow_riverbank",
+        "a barely-visible trail heading into shadow": "gloomfang_path"
+    }
+}
