@@ -5,18 +5,61 @@
     "characters": [
         {
             "name": "Grog",
-            "description": "A burly, red-faced man with a permanent scowl. He's polishing a glass with a dirty rag.",
-            "stats": { "strength": 15, "dexterity": 9, "intelligence": 8 }
+            "description": "A burly, red-faced dwarf with a magnificent beard and a perpetually sour expression. He looks strong enough to wrestle a bear.",
+            "stats": {
+                "strength": 18,
+                "dexterity": 8,
+                "intelligence": 10
+            },
+            "mood": "neutral",
+            "personality_tags": [
+                "gruff",
+                "suspicious",
+                "business-minded"
+            ],
+            "available_quest_ids": [
+                "grog_ale_unloading"
+            ]
         }
     ],
     "items": [
         {
             "name": "a mysterious amulet",
-            "description": "A silver amulet that hums with a faint, unseen energy."
+            "description": "A silver amulet shaped like a coiled serpent, its eyes set with tiny black gems.",
+            "category": "trinket",
+            "value": 50
+        }
+    ],
+    "interactables": [
+        {
+            "id": "storeroom_door",
+            "name": "storeroom door",
+            "description": "A heavy, reinforced oak door. It looks securely locked.",
+            "state": {
+                "locked": true
+            }
         }
     ],
     "exits": {
-        "an old, sturdy-looking oak door": "tavern_storeroom",
+        "an old, sturdy-looking oak door": "salty_siren_storeroom",
         "the main entrance": "town_square"
-    }
+    },
+    "quests": [
+        {
+            "id": "grog_ale_unloading",
+            "name": "Grog's Heavy Lifting",
+            "description": "Grog the tavernkeep needs help unloading a recent shipment of heavy ale barrels from the storeroom.",
+            "required_stat": "strength",
+            "required_dc": 12,
+            "objectives": [
+                {
+                    "id": "unload_ale_barrel_1",
+                    "description": "Move an ale barrel from the storeroom to the tavern.",
+                    "type": "interact",
+                    "target": "ale barrel",
+                    "required_count": 1
+                }
+            ]
+        }
+    ]
 }

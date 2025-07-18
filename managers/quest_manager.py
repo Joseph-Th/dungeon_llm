@@ -3,10 +3,11 @@ from typing import Dict, Any
 
 from definitions.quests import Quest, Objective
 from game_state import GameState
+from display_manager import DisplayManager
 
 class QuestManager:
 
-    def start_quest(self, game_state: GameState, quest_data: Dict[str, Any]):
+    def start_quest(self, game_state: GameState, quest_data: Dict[str, Any], display: DisplayManager):
         quest_id = quest_data.get("id")
         if not quest_id or quest_id in game_state.quest_log:
             logging.warning(f"Attempted to start duplicate or invalid quest: {quest_id}")
@@ -23,10 +24,9 @@ class QuestManager:
         
         game_state.quest_log[quest_id] = new_quest
         logging.info(f"Quest '{new_quest.name}' started for player.")
-        print(f"\n[New Quest Started: {new_quest.name}]")
-        print(f"  {new_quest.description}")
+        display.show_quest_started(new_quest.name, new_quest.description)
 
-    def check_for_updates(self, game_state: GameState, intent: str, result: str, intent_data: Dict[str, Any]):
+    def check_for_updates(self, game_state: GameState, intent: str, result: str, intent_data: Dict[str, Any], display: DisplayManager):
         if "Success" not in result and "Victory" not in result:
             return 
 
@@ -39,15 +39,15 @@ class QuestManager:
                 if objective.is_complete:
                     continue
                 
-                was_updated = self._check_objective(objective, intent, result, intent_data, game_state)
+                was_updated = self._check_objective(objective, intent, result, intent_data, game_state, display)
                 if was_updated:
                     needs_completion_check = True
 
             if needs_completion_check:
                 if all(obj.is_complete for obj in quest.objectives):
-                    self._complete_quest(quest)
+                    self._complete_quest(quest, display)
 
-    def _check_objective(self, objective: Objective, intent: str, result: str, intent_data: Dict[str, Any], game_state: GameState) -> bool:
+    def _check_objective(self, objective: Objective, intent: str, result: str, intent_data: Dict[str, Any], game_state: GameState, display: DisplayManager) -> bool:
         
         target_match = False
 
@@ -77,14 +77,12 @@ class QuestManager:
             if objective.current_count >= objective.required_count:
                 objective.is_complete = True
                 logging.info(f"Quest '{objective.id}' objective completed.")
-                print(f"\n[Objective Complete: {objective.description}]")
+                display.show_objective_complete(objective.description)
                 return True
         
         return False
 
-    def _complete_quest(self, quest: Quest):
+    def _complete_quest(self, quest: Quest, display: DisplayManager):
         quest.status = "completed"
         logging.info(f"Quest '{quest.name}' has been completed by the player.")
-        print(f"\n[Quest Complete: {quest.name}]")
-
-        # Hook for progression manager
+        display.show_quest_complete(quest.name)

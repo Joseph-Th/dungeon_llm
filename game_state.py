@@ -39,14 +39,15 @@ class GameWorld:
                     'inventory': [],
                     'mood': char_data.get('mood', 'neutral'),
                     'memory': char_data.get('memory', []),
+                    'personality_tags': char_data.get('personality_tags', []),
                     'hp': char_data.get('hp', 20),
                     'max_hp': char_data.get('max_hp', 20),
                     'status_effects': char_data.get('status_effects', []),
                     'level': char_data.get('level', 1),
                     'xp': char_data.get('xp', 0),
                     'xp_to_next_level': char_data.get('xp_to_next_level', 100),
-                    'armor_class': char_data.get('armor_class', 10),
-                    'attack_bonus': char_data.get('attack_bonus', 0),
+                    'base_armor_class': char_data.get('base_armor_class', 10),
+                    'base_attack_bonus': char_data.get('base_attack_bonus', 0),
                     'is_hostile': char_data.get('is_hostile', False),
                     'faction': char_data.get('faction', None),
                     'schedule': char_data.get('schedule', None)
@@ -117,7 +118,6 @@ class GameState:
         state_dict = self.to_dict()
         state_dict["location"] = current_location.to_dict()
         
-        # Reorder player to be last for better AI context readability
         player_data = state_dict.pop("player")
         state_dict["player"] = player_data
         
@@ -136,7 +136,7 @@ class GameState:
             if name_lower in item.name.lower():
                 return item, "item"
         for i in location.interactables:
-            if name_lower in i.name.lower():
+            if name_lower in i.name.lower() or name_lower in i.id.lower():
                 return i, "interactable"
         return None
 
@@ -147,6 +147,10 @@ class GameState:
     def find_character_in_location(self, name: str, world: GameWorld) -> Optional[Character]:
         result = self.find_in_location(name, world)
         return result[0] if result and result[1] == "character" else None
+        
+    def find_interactable_in_location(self, name: str, world: GameWorld) -> Optional[Interactable]:
+        result = self.find_in_location(name, world)
+        return result[0] if result and result[1] == "interactable" else None
     
     def move_item_from_location_to_player(self, item: Item, world: GameWorld):
         location = self.get_current_location(world)

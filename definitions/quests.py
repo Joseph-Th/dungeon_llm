@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 @dataclass
 class Objective:
@@ -31,6 +31,11 @@ class Quest:
     description: str
     status: str = "active" 
     objectives: List[Objective] = field(default_factory=list)
+    
+    # --- NEW FIELDS ---
+    required_stat: Optional[str] = None
+    required_dc: int = 0
+    # --- END NEW FIELDS ---
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -38,5 +43,7 @@ class Quest:
             "name": self.name,
             "description": self.description,
             "status": self.status,
-            "objectives": [obj.to_dict() for obj in self.objectives]
+            "objectives": [obj.to_dict() for obj in self.objectives],
+            "required_stat": self.required_stat,
+            "required_dc": self.required_dc,
         }

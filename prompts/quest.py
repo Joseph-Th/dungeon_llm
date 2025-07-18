@@ -13,13 +13,14 @@ The JSON object must have the following top-level keys: "id", "name", "descripti
 Each objective object must have:
 - "id": A unique ID for the objective (e.g., "unload_ale_barrel").
 - "description": A player-facing description (e.g., "Unload an ale barrel").
-- "type": The type of action required (e.g., "interact", "kill_target", "acquire_item").
+- "type": The type of action required. This must be one of the game's existing intents (e.g., "interact", "kill_target", "acquire_item", "give_item", "reach_location").
 - "target": The specific name or ID of the thing to interact with/kill/acquire.
 - "required_count": How many times the action must be performed.
+- "details" (optional): A dictionary for extra information, like a "recipient" for a "give_item" quest.
 
 Example Context:
 - Quest Giver Name: "Grog"
-- The quest giver's memory of the offer: "Offered someone work unloading ale barrels for 50 coppers a barrel."
+- The quest giver's memory of the offer: "Player asked about work; offered ale delivery job for 50 coppers/barrel."
 
 Example Response:
 {{
@@ -28,11 +29,11 @@ Example Response:
     "description": "Grog the tavernkeep has offered me 50 coppers per barrel to help unload a recent shipment of ale.",
     "objectives": [
         {{
-            "id": "unload_ale_barrel",
+            "id": "unload_ale_barrel_1",
             "description": "Unload an ale barrel from the storeroom.",
             "type": "interact",
             "target": "ale barrel",
-            "required_count": 5
+            "required_count": 1
         }}
     ]
 }}

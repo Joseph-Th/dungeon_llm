@@ -4,6 +4,7 @@ from typing import Dict
 from pathlib import Path
 
 from game_state import GameWorld, Location, Character, Item
+from definitions.quests import Quest, Objective
 
 class WorldLoader:
     def __init__(self, locations_data_dir: str):
@@ -48,9 +49,10 @@ class WorldLoader:
             name=char_data['name'],
             description=char_data['description'],
             stats=char_data['stats'],
-            inventory=char_data.get('inventory', []), # NPCs can have starting items
+            inventory=char_data.get('inventory', []),
             mood=char_data.get('mood', 'neutral'),
             memory=char_data.get('memory', []),
+            available_quest_ids=char_data.get('available_quest_ids', []),
             hp=hp,
             max_hp=max_hp,
             status_effects=char_data.get('status_effects', [])
@@ -59,11 +61,26 @@ class WorldLoader:
     def _rebuild_location(self, loc_data: Dict) -> Location:
         items = [Item(**item) for item in loc_data.get('items', [])]
         characters = [self._rebuild_character(char) for char in loc_data.get('characters', [])]
+
+        rebuilt_quests = []
+        for quest_data in loc_data.get('quests', []):
+            objectives = [Objective(**obj_data) for obj_data in quest_data.get('objectives', [])]
+            quest = Quest(
+                id=quest_data['id'],
+                name=quest_data['name'],
+                description=quest_data['description'],
+                required_stat=quest_data.get('required_stat'),
+                required_dc=quest_data.get('required_dc', 0),
+                objectives=objectives
+            )
+            rebuilt_quests.append(quest)
+        
         return Location(
             id=loc_data['id'],
             name=loc_data['name'],
             description=loc_data['description'],
             characters=characters,
             items=items,
-            exits=loc_data.get('exits', {})
+            exits=loc_data.get('exits', {}),
+            quests=rebuilt_quests
         )

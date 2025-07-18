@@ -42,6 +42,8 @@ class Character:
     
     mood: str = "neutral"
     memory: List[str] = field(default_factory=list)
+    personality_tags: List[str] = field(default_factory=list)
+    available_quest_ids: List[str] = field(default_factory=list)
     hp: int = 20
     max_hp: int = 20
     status_effects: List[str] = field(default_factory=list)
@@ -94,6 +96,8 @@ class Character:
             "equipment": {slot: item.to_dict() for slot, item in self.equipment.items() if item},
             "mood": self.mood,
             "memory": self.memory,
+            "personality_tags": self.personality_tags,
+            "available_quest_ids": self.available_quest_ids,
             "hp": self.hp,
             "max_hp": self.max_hp,
             "status_effects": self.status_effects,

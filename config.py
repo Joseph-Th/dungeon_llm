@@ -1,17 +1,25 @@
 # config.py
 
+# --- Primary API Configuration ---
+# Set to False to disable the Gemini API and use the Ollama fallback directly.
+USE_GEMINI_API = False
+
 # --- Gemini API Configuration ---
-# Replace "YOUR_API_KEY_HERE" with the actual API key you generated
-# from Google AI Studio.
-#
-# IMPORTANT:
-# 1. Do not share this file or your key with anyone.
-# 2. If you use a version control system like Git, add this file's name
-#    to your .gitignore file to prevent it from ever being uploaded.
+# Your Gemini key here...
 GEMINI_API_KEY = "AIzaSyA0BM8H6zh-LSWootFH_Subnur7bPQk_cs"
 
 # --- Game Configuration ---
-# The name of the AI model to use.
-# "gemini-1.5-flash" is a fast, multimodal model suitable for a wide range of applications.
-# The "gemini-pro" model name you were using is older and has been superseded.
 MODEL_NAME = "gemini-1.5-flash"
+
+
+# --- Ollama Fallback Configuration ---
+OLLAMA_ENABLED = True
+OLLAMA_BASE_URL = "http://localhost:11434"
+
+# The name of the Ollama model to use. After testing, llama3 proved more reliable
+# at understanding intent than qwen for this specific application.
+OLLAMA_MODEL = "llama3:8b"
+
+# The number of seconds to wait for a response from the Ollama API before giving up.
+# We are keeping the longer timeout as it's a good general robustness improvement.
+OLLAMA_TIMEOUT = 45

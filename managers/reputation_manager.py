@@ -2,13 +2,12 @@ import logging
 from typing import Dict, Any, Optional
 
 from game_state import GameState, Character
+from display_manager import DisplayManager
 
 class ReputationManager:
     
     def __init__(self):
         logging.info("ReputationManager initialized.")
-        # Define how much reputation changes for specific actions.
-        # This can be expanded with more intents and factions.
         self.reputation_map = {
             "town_guard": {
                 "give_item": 5,
@@ -16,14 +15,11 @@ class ReputationManager:
             },
             "thieves_guild": {
                 "attack": -20,
-                "give_item": 2, # They might be suspicious
+                "give_item": 2,
             }
         }
 
-    def process_event(self, game_state: GameState, intent: str, target: Optional[Character] = None):
-        """
-        Updates player's reputation based on an action taken.
-        """
+    def process_event(self, game_state: GameState, intent: str, display: DisplayManager, target: Optional[Character] = None):
         if not target or not target.faction:
             return
 
@@ -36,27 +32,18 @@ class ReputationManager:
         reputation_change = intent_effects.get(intent, 0)
 
         if reputation_change != 0:
-            self._adjust_reputation(game_state, faction, reputation_change)
+            self._adjust_reputation(game_state, faction, reputation_change, display)
 
-    def _adjust_reputation(self, game_state: GameState, faction: str, amount: int):
-        """
-        Safely adjusts the reputation for a given faction.
-        """
+    def _adjust_reputation(self, game_state: GameState, faction: str, amount: int, display: DisplayManager):
         if faction not in game_state.reputation:
             game_state.reputation[faction] = 0
         
         game_state.reputation[faction] += amount
         
         logging.info(f"Reputation with '{faction}' changed by {amount}. New reputation: {game_state.reputation[faction]}.")
-        if amount > 0:
-            print(f"[Your reputation with {faction.replace('_', ' ').title()} has increased.]")
-        else:
-            print(f"[Your reputation with {faction.replace('_', ' ').title()} has decreased.]")
+        display.show_reputation_change(faction, amount)
             
     def get_reputation_level(self, game_state: GameState, faction: str) -> str:
-        """
-        Translates a numerical reputation score into a descriptive level.
-        """
         score = game_state.reputation.get(faction, 0)
         
         if score > 50:

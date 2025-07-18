@@ -2,9 +2,13 @@ import logging
 from typing import List, Dict, Any, TYPE_CHECKING
 
 from game_state import GameState, GameWorld, Character
+from display_manager import DisplayManager
 
 if TYPE_CHECKING:
     from ai_manager import AIManager
+    from managers.npc_behavior_manager import NPCBehaviorManager
+    from managers.weather_manager import WeatherManager
+    from managers.companion_manager import CompanionManager
 
 def execute_player_mutations(game_state: GameState, mutations: List[Dict[str, Any]]):
     for mutation in mutations:
@@ -109,7 +113,14 @@ def execute_npc_schedules(game_state: GameState, world: GameWorld):
     if mutations_to_execute:
         execute_world_mutations(game_state, world, mutations_to_execute)
 
-def check_and_trigger_world_events(game_state: GameState, world: GameWorld, ai_manager: 'AIManager', old_minutes: int):
+def check_and_trigger_world_events(
+    game_state: GameState,
+    world: GameWorld,
+    ai_manager: 'AIManager',
+    old_minutes: int,
+    display: DisplayManager,
+    managers: Dict[str, Any]
+):
     old_hour = old_minutes // 60
     new_hour = game_state.minutes_elapsed // 60
     
@@ -117,6 +128,18 @@ def check_and_trigger_world_events(game_state: GameState, world: GameWorld, ai_m
         logging.info(f"Time has passed into a new hour ({old_hour} -> {new_hour}). Checking for world events.")
         
         execute_npc_schedules(game_state, world)
+
+        npc_behavior_manager = managers.get("npc_behavior")
+        if npc_behavior_manager:
+            npc_mutations = npc_behavior_manager.update_behaviors(game_state, world, ai_manager)
+            if npc_mutations:
+                execute_world_mutations(game_state, world, npc_mutations)
+        
+        weather_manager = managers.get("weather")
+        if weather_manager:
+            weather_mutations = weather_manager.update_weather(game_state, world, ai_manager)
+            if weather_mutations:
+                execute_world_mutations(game_state, world, weather_mutations)
         
         event_data = ai_manager.generate_world_event(game_state, world)
         if event_data:
@@ -124,7 +147,7 @@ def check_and_trigger_world_events(game_state: GameState, world: GameWorld, ai_m
             mutations = event_data.get("mutations", [])
             
             if summary:
-                print(f"\n[Time Passes...] {summary}")
+                display.system_message(f"\n[Time Passes...] {summary}")
             
             if mutations:
                 execute_world_mutations(game_state, world, mutations)
